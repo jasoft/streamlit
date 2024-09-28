@@ -5,6 +5,7 @@ import pandas as pd
 import coloredlogs
 import logging
 
+import pytz
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config("成交量预测")
@@ -118,13 +119,49 @@ def get_estimate_vol(minutes, vol=None):
 
 
 def during_market_time(current_time):
-    market_close_time = datetime.combine(
-        current_time.date(), datetime.strptime("15:00", "%H:%M").time()
+    # 定义 GMT+8 时区
+    tz_gmt_plus_8 = pytz.timezone("Asia/Shanghai")
+
+    # 将 current_time 转换为 GMT+8 时区时间
+    current_time_gmt8 = current_time.astimezone(tz_gmt_plus_8)
+
+    # 定义市场开放和关闭时间 (09:30 - 15:00) 并结合当天日期
+    market_open_time = tz_gmt_plus_8.localize(
+        datetime.combine(
+            current_time_gmt8.date(), datetime.strptime("09:30", "%H:%M").time()
+        )
     )
-    market_open_time = datetime.combine(
-        current_time.date(), datetime.strptime("09:30", "%H:%M").time()
+    market_close_time = tz_gmt_plus_8.localize(
+        datetime.combine(
+            current_time_gmt8.date(), datetime.strptime("15:00", "%H:%M").time()
+        )
     )
-    return market_open_time <= current_time < market_close_time
+
+    # 判断当前时间是否在市场开放时间段内
+    return market_open_time <= current_time_gmt8 < market_close_time
+
+
+def minutes_since_market_open(current_time):
+    # 定义 GMT+8 时区（北京时间）
+    tz_gmt_plus_8 = pytz.timezone("Asia/Shanghai")
+
+    # 将当前时间转换为北京时间
+    current_time_gmt8 = current_time.astimezone(tz_gmt_plus_8)
+
+    # 定义当天的开市时间 09:30
+    market_open_time = tz_gmt_plus_8.localize(
+        datetime.combine(
+            current_time_gmt8.date(), datetime.strptime("09:30", "%H:%M").time()
+        )
+    )
+
+    # 如果当前时间还没到开市时间，返回 0
+    if current_time_gmt8 < market_open_time:
+        return 0
+    else:
+        # 计算当前时间距离开市时间的分钟数
+        delta = current_time_gmt8 - market_open_time
+        return int(delta.total_seconds() // 60)  # 转换为分钟数
 
 
 # 获取当前成交额
@@ -151,10 +188,8 @@ def get_stock_volume():
 def predict_volume(current_volume, current_time):
     if not during_market_time(current_time):
         return current_volume  # 如果当前时间超过15:00，返回当前成交额作为预测值
-    market_open_time = datetime.combine(
-        current_time.date(), datetime.strptime("09:30", "%H:%M").time()
-    )
-    elapsed_minutes = (current_time - market_open_time).seconds // 60
+
+    elapsed_minutes = minutes_since_market_open(current_time)
 
     # 使用 get_estimate_vol 获取预测的成交额
     predicted_volume = get_estimate_vol(elapsed_minutes, current_volume)
