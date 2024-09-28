@@ -97,13 +97,18 @@ def get_estimate_vol(minutes, vol=None):
     curve = get_vol_curve(3)
     df = pd.DataFrame(curve, columns=["amount"])
     t = minutes // 15
+    if t > 15:
+        t = 15
     remaining_minutes = minutes % 15
+
     try:
         a = df[0:t]["amount"].sum() + df.loc[t] * remaining_minutes / 15
-        logger.debug(f"计算得到的累计比例：{a}")
+
+        logger.info(f"计算得到的累计比例：{a}")
     except KeyError:
         a = df[0:t]["amount"].sum()
         logger.warning(f"计算累计比例时发生KeyError，使用备选方案：{a}")
+        raise
 
     if not vol:
         total_vol = get_stock_volume()
@@ -208,7 +213,7 @@ current_time = datetime.now()
 
 # 显示当前的成交额
 st.write(
-    f"**上证成交额:** :red[{sh_vol/1e8:.2f}] 亿  **深证成交额:** :red[{sz_vol/1e8:.2f}] 亿",
+    f"**上证成交额:** :red[{sh_vol/1e8:.0f}] 亿  **深证成交额:** :red[{sz_vol/1e8:.0f}] 亿",
     unsafe_allow_html=True,
 )
 
@@ -218,19 +223,21 @@ sz_pred = predict_volume(sz_vol, current_time)
 
 # 显示预测的成交额
 st.markdown(
-    f"**预计上证总成交额:** :red[{sh_pred/1e8:.2f}] 亿 **预计深证总成交额:** :red[{sz_pred/1e8:.2f}] 亿",
+    f"**预计上证总成交额:** :red[{sh_pred/1e8:.0f}] 亿 **预计深证总成交额:** :red[{sz_pred/1e8:.0f}] 亿",
     unsafe_allow_html=True,
 )
-
+# 插入分割线
+st.markdown("---")
 # 计算总成交额和预测总成交额
 total_amount = sh_vol + sz_vol
 total_pred = sh_pred + sz_pred
 
 # 显示总成交额和预测总成交额
-st.write(f"### 当前总成交额: :red[{total_amount/1e8:.2f}] 亿 ###")
-st.write(f"### 预计今日总成交额: :red[{total_pred/1e8:.2f}] 亿 ###")
+st.write(f"### 当前总成交额: :red[{total_amount/1e8:.0f}] 亿 ###")
+st.write(f"### 预计今日总成交额: :red[{total_pred/1e8:.0f}] 亿 ###")
 
 # 数据更新时间
-st.write(
-    f"数据更新于: {current_time.astimezone(pytz.timezone('Asia/Shanghai')).strftime('%H:%M:%S')}"
-)
+updated_at = f"数据更新于: {current_time.astimezone(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')}"
+if not during_market_time(current_time):
+    updated_at += " （非交易时间）"
+st.caption(updated_at)
