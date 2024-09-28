@@ -231,4 +231,6 @@ st.write(f"### 当前总成交额: :red[{total_amount/1e8:.2f}] 亿 ###")
 st.write(f"### 预计今日总成交额: :red[{total_pred/1e8:.2f}] 亿 ###")
 
 # 数据更新时间
-st.write(f"数据更新于: {current_time.strftime('%H:%M:%S')}")
+st.write(
+    f"数据更新于: {current_time.astimezone(pytz.timezone('Asia/Shanghai')).strftime('%H:%M:%S')}"
+)
