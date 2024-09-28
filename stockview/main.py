@@ -71,7 +71,7 @@ def get_vol_curve(ndays):
             df_range["pct"] = df_range.apply(
                 lambda x: (x["totalvolume"] / day_amount), axis=1
             )
-            df_all = df_all.append(df_range)
+            df_all = pd.concat([df_all, df_range])
         df_all = df_all.reset_index()
         logger.info(f"成功计算{ndays}天的百分比数据")
 
@@ -86,14 +86,14 @@ def get_vol_curve(ndays):
         raise
 
 
-def get_estimate_vol(self, minutes, vol=None):
+def get_estimate_vol(minutes, vol=None):
     """
     获取估算的成交量
     <b>minutes</b>当日已经交易时间
     <b>vol</b>None是自动获取，否则指定
     """
     logger.info(f"开始估算成交量，已交易分钟数：{minutes}，指定成交量：{vol}")
-    curve = self.get_vol_curve(3)
+    curve = get_vol_curve(3)
     df = pd.DataFrame(curve, columns=["amount"])
     t = minutes // 15
     remaining_minutes = minutes % 15
@@ -105,10 +105,11 @@ def get_estimate_vol(self, minutes, vol=None):
         logger.warning(f"计算累计比例时发生KeyError，使用备选方案：{a}")
 
     if not vol:
-        vol = self.get_volume()
+        total_vol = get_stock_volume()
+        vol = total_vol[0] + total_vol[1]
         logger.info(f"自动获取成交量：{vol}")
     try:
-        estimated_vol = int(vol / a) if vol > 0 else 0
+        estimated_vol = int(vol / a.iloc[0]) if vol > 0 else 0
         logger.info(f"估算的成交量：{estimated_vol}")
         return estimated_vol
     except ZeroDivisionError:
@@ -116,18 +117,21 @@ def get_estimate_vol(self, minutes, vol=None):
         return 0
 
 
+def during_market_time(current_time):
+    market_close_time = datetime.combine(
+        current_time.date(), datetime.strptime("15:00", "%H:%M").time()
+    )
+    market_open_time = datetime.combine(
+        current_time.date(), datetime.strptime("09:30", "%H:%M").time()
+    )
+    return market_open_time <= current_time < market_close_time
+
+
 # 获取当前成交额
 @st.cache_data(ttl=dynamic_ttl)
 def get_stock_volume():
     global dynamic_ttl
-    current_time = datetime.now()
-    market_close_time = datetime.strptime("15:00", "%H:%M").time()
-    market_open_time = datetime.strptime("09:30", "%H:%M").time()
-
-    if (
-        current_time.time() > market_close_time
-        or current_time.time() < market_open_time
-    ):
+    if not during_market_time(datetime.now()):
         dynamic_ttl = 3600
 
     spot_df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
@@ -143,14 +147,13 @@ def get_stock_volume():
     return sh_vol, sz_vol
 
 
-# 简单的线性预测模型
+# 简单的预测模型
 def predict_volume(current_volume, current_time):
-    market_close_time = datetime.strptime("15:00", "%H:%M")
-    market_open_time = datetime.strptime("09:30", "%H:%M")
-
-    if current_time >= market_close_time:
+    if not during_market_time(current_time):
         return current_volume  # 如果当前时间超过15:00，返回当前成交额作为预测值
-
+    market_open_time = datetime.combine(
+        current_time.date(), datetime.strptime("09:30", "%H:%M").time()
+    )
     elapsed_minutes = (current_time - market_open_time).seconds // 60
 
     # 使用 get_estimate_vol 获取预测的成交额
