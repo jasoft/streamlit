@@ -173,8 +173,8 @@ class MarketTimeHelper:
 
     def during_market_time(self, current_time):
         current_time_gmt8 = current_time.astimezone(self.tz)
-        market_open_time, lunch_start_time, lunch_end_time, market_close_time = (
-            self._get_market_times(current_time_gmt8)
+        market_open_time, _, _, market_close_time = self._get_market_times(
+            current_time_gmt8
         )
 
         return market_open_time <= current_time_gmt8 < market_close_time
