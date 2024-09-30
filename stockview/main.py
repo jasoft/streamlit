@@ -197,20 +197,39 @@ def minutes_since_market_open(current_time):
     # 将当前时间转换为北京时间
     current_time_gmt8 = current_time.astimezone(tz_gmt_plus_8)
 
-    # 定义当天的开市时间 09:30
+    # 定义当天的开市时间 09:30 和午休时间 11:30-13:00
     market_open_time = tz_gmt_plus_8.localize(
         datetime.combine(
             current_time_gmt8.date(), datetime.strptime("09:30", "%H:%M").time()
+        )
+    )
+    lunch_start_time = tz_gmt_plus_8.localize(
+        datetime.combine(
+            current_time_gmt8.date(), datetime.strptime("11:30", "%H:%M").time()
+        )
+    )
+    lunch_end_time = tz_gmt_plus_8.localize(
+        datetime.combine(
+            current_time_gmt8.date(), datetime.strptime("13:00", "%H:%M").time()
         )
     )
 
     # 如果当前时间还没到开市时间，返回 0
     if current_time_gmt8 < market_open_time:
         return 0
-    else:
-        # 计算当前时间距离开市时间的分钟数
+    elif current_time_gmt8 < lunch_start_time:
+        # 计算上午交易时间
         delta = current_time_gmt8 - market_open_time
         return int(delta.total_seconds() // 60)  # 转换为分钟数
+    elif current_time_gmt8 < lunch_end_time:
+        # 如果当前时间在午休时间内，返回上午交易时间
+        return 120  # 上午交易时间固定为 120 分钟
+    else:
+        # 计算下午交易时间
+        delta = current_time_gmt8 - lunch_end_time
+        return 120 + int(
+            delta.total_seconds() // 60
+        )  # 上午交易时间 120 分钟 + 下午交易时间
 
 
 # 获取当前成交额
