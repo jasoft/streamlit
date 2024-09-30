@@ -37,6 +37,32 @@ logger.info("程序启动")
 # 只需要每天执行一次，获取成交量分时比例
 @st.cache_data(ttl=42000)
 def get_vol_curve(ndays):
+    """
+    获取指定天数的成交量曲线。
+
+    参数:
+    ndays (int): 要获取的天数。
+
+    返回:
+    list: 包含每15分钟成交量百分比的列表。
+
+    异常:
+    如果在获取或处理数据时发生错误，将记录错误并抛出异常。
+
+    功能描述:
+    1. 从 akshare 获取上证和深证的分钟数据。
+    2. 合并数据并计算总成交量。
+    3. 过滤掉当天的数据，只保留指定天数的数据。
+    4. 计算每15分钟的成交量占当天总成交量的百分比。
+    5. 生成并返回成交量曲线。
+
+    日志:
+    - 记录获取数据的开始和成功信息。
+    - 记录数据处理完成的信息。
+    - 记录百分比数据计算成功的信息。
+    - 记录生成成交量曲线的信息。
+    - 记录任何发生的错误。
+    """
     logger.info(f"开始获取成交量曲线，天数：{ndays}")
     try:
         stock_zh_a_minute_df_sh = ak.stock_zh_a_minute(
@@ -89,10 +115,28 @@ def get_vol_curve(ndays):
 
 def get_estimate_vol(minutes, vol=None):
     """
-    获取估算的成交量
-    <b>minutes</b>当日已经交易时间
-    <b>vol</b>None是自动获取，否则指定
+    估算成交量。
+
+    参数：
+    minutes (int): 已交易的分钟数。
+    vol (int, 可选): 指定的成交量。如果未提供，将自动获取。
+
+    返回：
+    int: 估算的成交量。如果发生错误，返回0。
+
+    异常：
+    KeyError: 当计算累计比例时发生键错误。
+    ZeroDivisionError: 当估算成交量时发生除零错误。
+
+    日志：
+    - 记录开始估算成交量的信息。
+    - 记录计算得到的累计比例。
+    - 记录自动获取的成交量（如果未指定）。
+    - 记录估算的成交量。
+    - 记录计算累计比例时的键错误警告。
+    - 记录估算成交量时的除零错误。
     """
+
     logger.info(f"开始估算成交量，已交易分钟数：{minutes}，指定成交量：{vol}")
     curve = get_vol_curve(3)
     df = pd.DataFrame(curve, columns=["amount"])
@@ -171,7 +215,19 @@ def minutes_since_market_open(current_time):
 
 # 获取当前成交额
 @st.cache_data(ttl=dynamic_ttl)
-def get_stock_volume():
+def get_stock_volume() -> tuple[float, float]:
+    """
+    获取上证和深证指数的成交量。
+
+    该函数使用 akshare 库获取当前上证指数和深证指数的成交量。
+    如果当前时间不在交易时间内，则将全局的 TTL 变量设置为 3600 秒。
+
+    返回:
+        tuple: 包含上证和深证指数成交量的元组，格式为 (sh_vol, sz_vol)。
+
+    异常:
+        KeyError: 如果在获取的数据中未找到预期的股票代码（上证为 "000001"，深证为 "399001"）。
+    """
     global dynamic_ttl
     if not during_market_time(datetime.now()):
         dynamic_ttl = 3600
@@ -213,8 +269,7 @@ current_time = datetime.now()
 
 # 显示当前的成交额
 st.write(
-    f"**上证成交额:** :red[{sh_vol/1e8:.0f}] 亿  **深证成交额:** :red[{sz_vol/1e8:.0f}] 亿",
-    unsafe_allow_html=True,
+    f"**上证成交额:** :red[{sh_vol/1e8:.0f}] 亿  **深证成交额:** :red[{sz_vol/1e8:.0f}] 亿"
 )
 
 # 预测成交额
@@ -223,8 +278,7 @@ sz_pred = predict_volume(sz_vol, current_time)
 
 # 显示预测的成交额
 st.markdown(
-    f"**预计上证总成交额:** :red[{sh_pred/1e8:.0f}] 亿 **预计深证总成交额:** :red[{sz_pred/1e8:.0f}] 亿",
-    unsafe_allow_html=True,
+    f"**预计上证总成交额:** :red[{sh_pred/1e8:.0f}] 亿 **预计深证总成交额:** :red[{sz_pred/1e8:.0f}] 亿"
 )
 # 插入分割线
 st.markdown("---")
@@ -237,7 +291,9 @@ st.write(f"### 当前总成交额: :red[{total_amount/1e8:.0f}] 亿 ###")
 st.write(f"### 预计今日总成交额: :red[{total_pred/1e8:.0f}] 亿 ###")
 
 # 数据更新时间
-updated_at = f"数据更新于: {current_time.astimezone(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')}"
-if not during_market_time(current_time):
-    updated_at += " （非交易时间）"
-st.caption(updated_at)
+# 数据更新时间
+updated_at = current_time.astimezone(pytz.timezone("Asia/Shanghai")).strftime(
+    "%Y-%m-%d %H:%M:%S"
+)
+status = "（非交易时间）" if not during_market_time(current_time) else ""
+st.caption(f"数据更新于: {updated_at} {status}")
