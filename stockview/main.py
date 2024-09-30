@@ -177,9 +177,7 @@ class MarketTimeHelper:
             self._get_market_times(current_time_gmt8)
         )
 
-        return (market_open_time <= current_time_gmt8 < lunch_start_time) or (
-            lunch_end_time <= current_time_gmt8 < market_close_time
-        )
+        return market_open_time <= current_time_gmt8 < market_close_time
 
     def minutes_since_market_open(self, current_time):
         current_time_gmt8 = current_time.astimezone(self.tz)
