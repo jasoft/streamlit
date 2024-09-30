@@ -252,8 +252,12 @@ def get_stock_volume() -> tuple[float, float]:
     if not during_market_time(datetime.now()):
         dynamic_ttl = 3600
 
-    spot_df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
-    spot_df_sz = ak.stock_zh_index_spot_em(symbol="深证系列指数")
+    try:
+        spot_df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
+        spot_df_sz = ak.stock_zh_index_spot_em(symbol="深证系列指数")
+    except Exception as e:
+        logger.error(f"获取指数数据时发生错误：{str(e)}")
+        return 0, 0
 
     sh_vol = spot_df_sh[spot_df_sh["代码"] == "000001"]["成交额"].values[
         0
