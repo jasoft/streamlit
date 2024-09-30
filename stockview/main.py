@@ -254,6 +254,7 @@ def get_stock_volume() -> tuple[float, float]:
 
     spot_df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
     spot_df_sz = ak.stock_zh_index_spot_em(symbol="深证系列指数")
+    logger.info("获取上证和深证指数的成交量", spot_df_sh, spot_df_sz)
 
     sh_vol = spot_df_sh[spot_df_sh["代码"] == "000001"]["成交额"].values[
         0
