@@ -291,6 +291,7 @@ def get_stock_volume() -> tuple[float, float]:
         dynamic_ttl = 3600
 
     try:
+        logger.info("开始获取指数数据")
         spot_df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
         spot_df_sz = ak.stock_zh_index_spot_em(symbol="深证系列指数")
     except Exception as e:
