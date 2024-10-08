@@ -34,6 +34,41 @@ logger.addHandler(file_handler)
 logger.info("程序启动")
 
 
+@st.cache_data(ttl=3600)
+def is_trade_date(date):
+    """
+    判断是否是交易日。
+
+    参数:
+    date (datetime.date): 要检查的日期。
+
+    返回:
+    bool: 如果是交易日，则返回 True；否则返回 False。
+
+    异常:
+    如果在检查日期时发生错误，将记录错误并抛出异常。
+
+    日志:
+    - 记录检查日期的开始信息。
+    - 记录检查日期的结果。
+    - 记录任何发生的错误。
+    """
+    logger.info(f"开始检查日期：{date}")
+    try:
+        stock_calendar = ak.tool_trade_date_hist_sina()
+        stock_calendar["trade_date"] = pd.to_datetime(stock_calendar["trade_date"])
+        stock_calendar.set_index("trade_date", inplace=True)
+        if date in stock_calendar.index:
+            logger.info(f"{date} 是交易日")
+            return True
+        else:
+            logger.info(f"{date} 不是交易日")
+            return False
+    except Exception as e:
+        logger.error(f"检查日期时发生错误：{str(e)}")
+        raise
+
+
 # 只需要每天执行一次，获取成交量分时比例
 @st.cache_data(ttl=42000)
 def get_vol_curve(ndays):
@@ -226,7 +261,10 @@ market_time_helper = MarketTimeHelper()
 
 # 修改相关函数调用
 def during_market_time(current_time):
-    return market_time_helper.during_market_time(current_time)
+    today_gmt8 = datetime.now(pytz.timezone("Asia/Shanghai")).date()
+    return is_trade_date(today_gmt8) and market_time_helper.during_market_time(
+        current_time
+    )
 
 
 def minutes_since_market_open(current_time):
@@ -265,9 +303,33 @@ def get_stock_volume() -> tuple[float, float]:
     sz_vol = spot_df_sz[spot_df_sz["代码"] == "399001"]["成交额"].values[
         0
     ]  # 深证成交额
-    logger.info("获取上证和深证指数的成交量", sh_vol, sz_vol)
+    logger.info(f"获取上证和深证指数的成交量: 上证 {sh_vol}, 深证 {sz_vol}")
 
     return sh_vol, sz_vol
+
+
+@st.cache_data(ttl=180)
+def top5_stock_vol_percent():
+    # 获取 A 股实时行情数据
+    df = ak.stock_zh_a_spot_em()
+    # 按成交量降序排序
+    df_sorted = df.sort_values("成交量", ascending=False)
+
+    # 计算前5%的股票数量
+    num_stocks = len(df)
+    top_5_percent = int(num_stocks * 0.05)
+
+    # 计算总成交量
+    total_volume = df["成交量"].sum()
+
+    # 计算前5%股票的成交量总和
+    top_5_percent_volume = df_sorted["成交量"].head(top_5_percent).sum()
+
+    # 计算拥挤度
+    crowdedness = top_5_percent_volume / total_volume
+    logger.info(f"前5%成交量的股票占总成交量的 {crowdedness*100:.2f}%")
+
+    return crowdedness
 
 
 # 简单的预测模型
@@ -283,42 +345,56 @@ def predict_volume(current_volume, current_time):
     return predicted_volume
 
 
-# Streamlit 页面设置
-st.title("A股实时成交额监控及预测")
+def streamlit():
+    # Streamlit 页面设置
+    st.title("A股实时成交额监控及预测")
 
-# 获取当前成交额
-sh_vol, sz_vol = get_stock_volume()
+    # 获取当前成交额
+    sh_vol, sz_vol = get_stock_volume()
 
-# 当前时间
-current_time = datetime.now()
+    # 当前时间
+    current_time = datetime.now()
 
-# 显示当前的成交额
-st.write(
-    f"**上证成交额:** :red[{sh_vol/1e8:.0f}] 亿  **深证成交额:** :red[{sz_vol/1e8:.0f}] 亿"
-)
+    # 显示当前的成交额
+    st.write(
+        f"**上证成交额:** :red[{sh_vol/1e8:.0f}] 亿  **深证成交额:** :red[{sz_vol/1e8:.0f}] 亿"
+    )
 
-# 预测成交额
-sh_pred = predict_volume(sh_vol, current_time)
-sz_pred = predict_volume(sz_vol, current_time)
+    # 预测成交额
+    sh_pred = predict_volume(sh_vol, current_time)
+    sz_pred = predict_volume(sz_vol, current_time)
 
-# 显示预测的成交额
-st.markdown(
-    f"**预计上证总成交额:** :red[{sh_pred/1e8:.0f}] 亿 **预计深证总成交额:** :red[{sz_pred/1e8:.0f}] 亿"
-)
-# 插入分割线
-st.markdown("---")
-# 计算总成交额和预测总成交额
-total_amount = sh_vol + sz_vol
-total_pred = sh_pred + sz_pred
+    # 显示预测的成交额
+    if is_trade_date(date.today()):
+        st.markdown(
+            f"**预计上证总成交额:** :red[{sh_pred/1e8:.0f}] 亿 **预计深证总成交额:** :red[{sz_pred/1e8:.0f}] 亿"
+        )
+    # 插入分割线
+    st.markdown("---")
+    # 计算总成交额和预测总成交额
+    total_amount = sh_vol + sz_vol
+    total_pred = sh_pred + sz_pred
 
-# 显示总成交额和预测总成交额
-st.write(f"### 当前总成交额: :red[{total_amount/1e8:.0f}] 亿 ###")
-st.write(f"### 预计今日总成交额: :red[{total_pred/1e8:.0f}] 亿 ###")
+    # 显示总成交额和预测总成交额
+    st.write(f"### 当前总成交额: :red[{total_amount/1e8:.0f}] 亿 ###")
+    if is_trade_date(date.today()):
+        st.write(f"### 预计今日总成交额: :red[{total_pred/1e8:.0f}] 亿 ###")
 
-# 数据更新时间
-# 数据更新时间
-updated_at = current_time.astimezone(pytz.timezone("Asia/Shanghai")).strftime(
-    "%Y-%m-%d %H:%M:%S"
-)
-status = "（非交易时间）" if not during_market_time(current_time) else ""
-st.caption(f"数据更新于: {updated_at} {status}")
+    # 数据更新时间
+    # 数据更新时间
+    updated_at = current_time.astimezone(pytz.timezone("Asia/Shanghai")).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    status = "（非交易时间）" if not during_market_time(current_time) else ""
+    crowdedness = top5_stock_vol_percent() * 100
+
+    # 拥挤度，算法参见https://legulegu.com/stockdata/ashares-congestion
+    if crowdedness > 50:
+        st.write(f"### 交易拥挤度：:red[{crowdedness:.2f}] ###")
+    else:
+        st.write(f"### 交易拥挤度：:green[{crowdedness:.2f}] ###")
+    st.caption(f"数据更新于: {updated_at} {status}")
+
+
+if __name__ == "__main__":
+    streamlit()
