@@ -405,7 +405,7 @@ def streamlit():
 
     if st.button("清除缓存"):
         st.cache_data.clear()
-        st.experimental_rerun()
+        st.success("缓存已清除")
 
 
 if __name__ == "__main__":
