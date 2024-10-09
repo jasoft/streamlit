@@ -305,6 +305,9 @@ def get_stock_volume() -> tuple[float, float]:
         0
     ]  # 深证成交额
     logger.info(f"获取上证和深证指数的成交量: 上证 {sh_vol}, 深证 {sz_vol}")
+    if pd.isna(sh_vol) or pd.isna(sz_vol):
+        logger.error("获取的成交量数据包含 NaN 值")
+        return 0, 0
 
     return sh_vol, sz_vol
 
@@ -322,6 +325,10 @@ def top5_stock_vol_percent():
 
     # 计算总成交量
     total_volume = df["成交量"].sum()
+
+    if total_volume == 0:
+        logger.info("总成交量为0, 可能是盘前，无法计算拥挤度")
+        return 0
 
     # 计算前5%股票的成交量总和
     top_5_percent_volume = df_sorted["成交量"].head(top_5_percent).sum()
