@@ -403,6 +403,10 @@ def streamlit():
         st.write(f"### 交易拥挤度：:green[{crowdedness:.2f}] ###")
     st.caption(f"数据更新于: {updated_at} {status}")
 
+    if st.button("清除缓存"):
+        st.cache_data.clear()
+        st.experimental_rerun()
+
 
 if __name__ == "__main__":
     streamlit()
