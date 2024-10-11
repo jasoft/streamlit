@@ -34,7 +34,7 @@ logger.addHandler(file_handler)
 logger.info("程序启动")
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=60)
 def is_trade_date(date):
     """
     判断是否是交易日。
@@ -56,9 +56,10 @@ def is_trade_date(date):
     logger.info(f"开始检查日期：{date}")
     try:
         stock_calendar = ak.tool_trade_date_hist_sina()
+
         stock_calendar["trade_date"] = pd.to_datetime(stock_calendar["trade_date"])
         stock_calendar.set_index("trade_date", inplace=True)
-        if date in stock_calendar.index:
+        if f"{date} 00:00:00" in stock_calendar.index:
             logger.info(f"{date} 是交易日")
             return True
         else:
