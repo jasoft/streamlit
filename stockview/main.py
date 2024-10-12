@@ -12,7 +12,6 @@ st.set_page_config("成交量预测")
 # Run the autorefresh about every 2000 milliseconds (2 seconds) and stop
 # after it's been refreshed 100 times.
 st_autorefresh(interval=60000, key="fizzbuzzcounter")
-dynamic_ttl = 180
 
 coloredlogs.install(level="INFO")
 logger = logging.getLogger("streamlit.stockview")
@@ -30,8 +29,6 @@ file_handler.setFormatter(
     logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 )
 logger.addHandler(file_handler)
-
-logger.info("程序启动")
 
 
 @st.cache_data(ttl=60)
@@ -273,7 +270,7 @@ def minutes_since_market_open(current_time):
 
 
 # 获取当前成交额
-@st.cache_data(ttl=dynamic_ttl)
+@st.cache_data(ttl=180)
 def get_stock_volume() -> tuple[float, float]:
     """
     获取上证和深证指数的成交量。
@@ -287,9 +284,6 @@ def get_stock_volume() -> tuple[float, float]:
     异常:
         KeyError: 如果在获取的数据中未找到预期的股票代码（上证为 "000001"，深证为 "399001"）。
     """
-    global dynamic_ttl
-    if not during_market_time(datetime.now()):
-        dynamic_ttl = 3600
 
     try:
         logger.info("开始获取指数数据")
@@ -355,10 +349,12 @@ def predict_volume(current_volume, current_time):
 
 
 def streamlit():
+    logger.info("程序启动")
     # Streamlit 页面设置
     st.title("A股实时成交额监控及预测")
 
     # 获取当前成交额
+    logger.info("开始获取当前成交额")
     sh_vol, sz_vol = get_stock_volume()
 
     # 当前时间
