@@ -1,4 +1,4 @@
 /.venv
 /.vscode
 /stockview.log
-_pycache_
+__pycache__

@@ -162,7 +162,7 @@ def get_estimate_vol(minutes, vol=None):
         raise
 
     if not vol:
-        total_vol = get_stock_volume()
+        total_vol = get_a_volume()
         vol = total_vol[0] + total_vol[1]
         logger.info(f"自动获取成交量：{vol}")
     try:
@@ -174,10 +174,39 @@ def get_estimate_vol(minutes, vol=None):
         return 0
 
 
-@st.cache_data(ttl=180)
-def get_index_value(symbol):
+@st.cache_data(ttl=42000)
+def get_n_day_avg_volume(n):
+    """
+    获取上证和深证指数最近 n 个交易日的平均成交额。
+
+    参数:
+        n (int): 要计算的交易日天数。
+
+    返回:
+        tuple: 包含上证和深证指数平均成交额的元组，格式为 (sh_avg_vol, sz_avg_vol)。
+    """
+    logger.info(f"开始获取最近 {n} 个交易日的平均成交额")
     try:
-        index_data = ak.stock_zh_index_spot_em()
+        stock_zh_a_daily_df_sh = ak.stock_zh_index_daily_em(symbol="sh000001")
+        stock_zh_a_daily_df_sz = ak.stock_zh_index_daily_em(symbol="sz399001")
+        logger.info("成功获取上证和深证每日数据")
+
+        sh_vol = stock_zh_a_daily_df_sh["volume"].tail(n).mean()
+        sz_vol = stock_zh_a_daily_df_sz["volume"].tail(n).mean()
+
+        logger.info(
+            f"最近 {n} 个交易日上证平均成交额: {sh_vol}, 深证平均成交额: {sz_vol}"
+        )
+        return sh_vol + sz_vol
+    except Exception as e:
+        logger.error(f"获取最近 {n} 个交易日的平均成交额时发生错误：{str(e)}")
+        return 0, 0
+
+
+@st.cache_data(ttl=180)
+def get_index_price(symbol):
+    try:
+        index_data = ak.stock_zh_index_spot_em(symbol="深证系列指数")
         index_value = index_data[index_data["代码"] == symbol]["最新价"].values[0]
         return index_value
     except Exception as e:
@@ -185,9 +214,22 @@ def get_index_value(symbol):
         return None
 
 
+def get_index_volume(symbol):
+    try:
+        df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
+        df_sz = ak.stock_zh_index_spot_em(symbol="深证系列指数")
+        df = pd.concat([df_sh, df_sz], axis=0)
+
+        index_value = df[df["代码"] == symbol]["成交额"].values[0]
+        return index_value
+    except Exception as e:
+        logger.error(f"获取指数 {symbol} 当前成交额时发生错误：{str(e)}")
+        return None
+
+
 # 获取当前成交额
 @st.cache_data(ttl=180)
-def get_stock_volume() -> tuple[float, float]:
+def get_a_volume() -> tuple[float, float]:
     """
     获取上证和深证指数的成交量。
 
@@ -349,15 +391,10 @@ def streamlit_market_heat():
 
     # 获取当前成交额
     logger.info("开始获取当前成交额")
-    sh_vol, sz_vol = get_stock_volume()
+    sh_vol, sz_vol = get_a_volume()
 
     # 当前时间
     current_time = datetime.now()
-
-    # 显示当前的成交额
-    st.write(
-        f"**上证成交额:** :red[{sh_vol/1e8:.0f}] 亿  **深证成交额:** :red[{sz_vol/1e8:.0f}] 亿"
-    )
 
     # 预测成交额
     sh_pred = predict_volume(sh_vol, current_time)
@@ -374,10 +411,22 @@ def streamlit_market_heat():
     total_amount = sh_vol + sz_vol
     total_pred = sh_pred + sz_pred
 
+    # 创业板成交占比（散户跟风指标）
+    cyb_volume = get_index_volume("399006")
+    # 显示当前的成交额
+    st.write(
+        f"**上证成交额:** :red[{sh_vol/1e8:.0f}] 亿  **深证成交额:** :red[{sz_vol/1e8:.0f}] 亿 **创业板成交额:** :red[{cyb_volume/1e8:.0f}] 亿"
+    )
+
     # 显示总成交额和预测总成交额
     st.write(f"### 当前总成交额: :red[{total_amount/1e8:.0f}] 亿 ###")
+    # 计算创业板成交占总成交比例
+    cyb_ratio = cyb_volume / total_amount * 100
+    st.write(f"### 创业板成交占总成交比例：:red[{cyb_ratio:.2f}%] ###")
+
     if is_trade_date(datetime.now(pytz.timezone("Asia/Shanghai")).date()):
         st.write(f"### 预计今日总成交额: :red[{total_pred/1e8:.0f}] 亿 ###")
+    st.write(f"### 5日均值: :red[{get_n_day_avg_volume(5)/1e5:.0f}] 亿 ###")
 
     # 数据更新时间
     # 数据更新时间
