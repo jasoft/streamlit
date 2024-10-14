@@ -1,34 +1,17 @@
 import streamlit as st
-import akshare as ak
 from datetime import date, datetime
 import pandas as pd
-import coloredlogs
-import logging
+from log import logger
 
 import pytz
 from streamlit_autorefresh import st_autorefresh
+
+from akcache import akshare as ak
 
 st.set_page_config("成交量预测")
 # Run the autorefresh about every 2000 milliseconds (2 seconds) and stop
 # after it's been refreshed 100 times.
 st_autorefresh(interval=60000, key="fizzbuzzcounter")
-
-coloredlogs.install(level="INFO")
-logger = logging.getLogger("streamlit.stockview")
-
-# 配置日志记录
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-# 添加一个文件处理器，将日志写入文件
-file_handler = logging.FileHandler("stockview.log")
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(
-    logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-)
-logger.addHandler(file_handler)
 
 
 @st.cache_data(ttl=60)
@@ -41,22 +24,12 @@ def is_trade_date(date):
 
     返回:
     bool: 如果是交易日，则返回 True；否则返回 False。
-
-    异常:
-    如果在检查日期时发生错误，将记录错误并抛出异常。
-
-    日志:
-    - 记录检查日期的开始信息。
-    - 记录检查日期的结果。
-    - 记录任何发生的错误。
     """
     logger.info(f"开始检查日期：{date}")
     try:
         stock_calendar = ak.tool_trade_date_hist_sina()
-
-        stock_calendar["trade_date"] = pd.to_datetime(stock_calendar["trade_date"])
-        stock_calendar.set_index("trade_date", inplace=True)
-        if f"{date} 00:00:00" in stock_calendar.index:
+        stock_calendar_dates = pd.to_datetime(stock_calendar["trade_date"]).dt.date
+        if date in set(stock_calendar_dates):
             logger.info(f"{date} 是交易日")
             return True
         else:
@@ -129,6 +102,9 @@ def get_vol_curve(ndays):
             df_range = df2.iloc[i * 16 : (i + 1) * 16]
             day_amount = df_range.totalvolume.sum()
             df_range["pct"] = df_range.apply(
+                lambda x: (x["totalvolume"] / day_amount), axis=1
+            )
+            df_range.loc[:, "pct"] = df_range.apply(
                 lambda x: (x["totalvolume"] / day_amount), axis=1
             )
             df_all = pd.concat([df_all, df_range])
@@ -269,6 +245,17 @@ def minutes_since_market_open(current_time):
     return market_time_helper.minutes_since_market_open(current_time)
 
 
+@st.cache_data(ttl=180)
+def get_index_value(symbol):
+    try:
+        index_data = ak.stock_zh_index_spot_em()
+        index_value = index_data[index_data["代码"] == symbol]["最新价"].values[0]
+        return index_value
+    except Exception as e:
+        logger.error(f"获取指数 {symbol} 当前价格时发生错误：{str(e)}")
+        return None
+
+
 # 获取当前成交额
 @st.cache_data(ttl=180)
 def get_stock_volume() -> tuple[float, float]:
@@ -308,7 +295,46 @@ def get_stock_volume() -> tuple[float, float]:
 
 
 @st.cache_data(ttl=180)
+def middle_price_change():
+    """
+    计算所有股票的中位数涨幅。
+
+    该函数获取A股的实时交易数据，并计算所有股票的中间涨幅（即按涨幅排序后位于中间的股票涨幅）。
+
+    返回:
+        float: 中间股票涨幅。如果数据为空，则返回0。
+    """
+    df = ak.stock_zh_a_spot_em()
+    if df.empty:
+        logger.info("实时行情数据为空，无法计算中间涨幅")
+        return 0
+
+    # 按涨幅排序
+    df_sorted = df.sort_values("涨跌幅")
+
+    # 计算中间位置
+    middle_index = len(df_sorted) // 2
+
+    # 获取中间涨幅
+    middle_price_change = df_sorted.iloc[middle_index]["涨跌幅"]
+    logger.info(f"中间股票涨幅为: {middle_price_change}")
+
+    return middle_price_change
+
+
+@st.cache_data(ttl=180)
 def top5_stock_vol_percent():
+    """
+    计算前5%的股票对总成交量的贡献百分比。
+
+    该函数获取A股的实时交易数据，将股票按成交量降序排序，并计算总成交量。
+    然后确定构成前5%成交量的股票数量，并计算这些股票的总成交量。
+    最后，计算前5%的股票对总成交量的贡献百分比。
+
+    返回:
+        float: 前5%的股票对总成交量的贡献百分比。如果总成交量为零，则返回0。
+    """
+
     # 获取 A 股实时行情数据
     df = ak.stock_zh_a_spot_em()
     # 按成交量降序排序
@@ -351,7 +377,7 @@ def predict_volume(current_volume, current_time):
 def streamlit():
     logger.info("程序启动")
     # Streamlit 页面设置
-    st.title("A股实时成交额监控及预测")
+    st.title("A股观测")
 
     # 获取当前成交额
     logger.info("开始获取当前成交额")
@@ -370,10 +396,10 @@ def streamlit():
     sz_pred = predict_volume(sz_vol, current_time)
 
     # 显示预测的成交额
-    if is_trade_date(date.today()):
-        st.markdown(
-            f"**预计上证总成交额:** :red[{sh_pred/1e8:.0f}] 亿 **预计深证总成交额:** :red[{sz_pred/1e8:.0f}] 亿"
-        )
+    # if is_trade_date(date.today()):
+    #     st.markdown(
+    #         f"**预计上证总成交额:** :red[{sh_pred/1e8:.0f}] 亿 **预计深证总成交额:** :red[{sz_pred/1e8:.0f}] 亿"
+    #     )
     # 插入分割线
     st.markdown("---")
     # 计算总成交额和预测总成交额
@@ -398,6 +424,11 @@ def streamlit():
         st.write(f"### 交易拥挤度：:red[{crowdedness:.2f}] ###")
     else:
         st.write(f"### 交易拥挤度：:green[{crowdedness:.2f}] ###")
+
+    # 中间股票涨幅
+    middle_price_change_value = middle_price_change()
+    st.write(f"### 中位数股票涨幅：:red[{middle_price_change_value:.2f}%] ###")
+
     st.caption(f"数据更新于: {updated_at} {status}")
 
     if st.button("清除缓存"):
