@@ -9,7 +9,11 @@ import requests
 # 数据获取函数
 def get_html_content(url):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/91.0.4472.124 Safari/537.36"
+        )
     }
     try:
         response = requests.get(url, headers=headers)
@@ -53,7 +57,7 @@ def process_html_data(html_content):
 
 
 # Streamlit 应用
-def main():
+def streamlit():
     st.title("A股市场拥挤度和上证指数走势图")
     # 设置页面布局为宽屏模式
     # 用户输入 URL
@@ -125,4 +129,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    streamlit()

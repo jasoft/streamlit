@@ -7,11 +7,8 @@ import pytz
 from streamlit_autorefresh import st_autorefresh
 
 from akcache import akshare as ak
-
-st.set_page_config("成交量预测")
-# Run the autorefresh about every 2000 milliseconds (2 seconds) and stop
-# after it's been refreshed 100 times.
-st_autorefresh(interval=60000, key="fizzbuzzcounter")
+from stockview.options import analyze_atm_options
+from stockview.helpers import during_market_time, minutes_since_market_open
 
 
 @st.cache_data(ttl=60)
@@ -86,7 +83,7 @@ def get_vol_curve(ndays):
         df2["volume_sz"] = pd.to_numeric(df2["volume_sz"])
         df2["date"] = pd.to_datetime(
             df2["day"], infer_datetime_format=True
-        )  # format='%Y-%m-%d %H:%M:%S')
+        )  # format='%Y-%m-%d %H:%M:%S'
         df2["totalvolume"] = df2.apply(
             lambda x: (x["volume_sh"] + x["volume_sz"]), axis=1
         )
@@ -122,6 +119,7 @@ def get_vol_curve(ndays):
         raise
 
 
+@st.cache_data(ttl=180)
 def get_estimate_vol(minutes, vol=None):
     """
     估算成交量。
@@ -174,75 +172,6 @@ def get_estimate_vol(minutes, vol=None):
     except ZeroDivisionError:
         logger.error("估算成交量时发生除零错误")
         return 0
-
-
-class MarketTimeHelper:
-    def __init__(self, timezone="Asia/Shanghai"):
-        self.tz = pytz.timezone(timezone)
-
-    def during_market_time(self, current_time):
-        current_time_gmt8 = current_time.astimezone(self.tz)
-        market_open_time, _, _, market_close_time = self._get_market_times(
-            current_time_gmt8
-        )
-
-        return market_open_time <= current_time_gmt8 < market_close_time
-
-    def minutes_since_market_open(self, current_time):
-        current_time_gmt8 = current_time.astimezone(self.tz)
-        market_open_time, lunch_start_time, lunch_end_time, _ = self._get_market_times(
-            current_time_gmt8
-        )
-
-        if current_time_gmt8 < market_open_time:
-            return 0
-        elif current_time_gmt8 < lunch_start_time:
-            delta = current_time_gmt8 - market_open_time
-            return int(delta.total_seconds() // 60)
-        elif current_time_gmt8 < lunch_end_time:
-            return 120
-        else:
-            delta = current_time_gmt8 - lunch_end_time
-            return 120 + int(delta.total_seconds() // 60)
-
-    def _get_market_times(self, current_time_gmt8):
-        market_open_time = self.tz.localize(
-            datetime.combine(
-                current_time_gmt8.date(), datetime.strptime("09:30", "%H:%M").time()
-            )
-        )
-        lunch_start_time = self.tz.localize(
-            datetime.combine(
-                current_time_gmt8.date(), datetime.strptime("11:30", "%H:%M").time()
-            )
-        )
-        lunch_end_time = self.tz.localize(
-            datetime.combine(
-                current_time_gmt8.date(), datetime.strptime("13:00", "%H:%M").time()
-            )
-        )
-        market_close_time = self.tz.localize(
-            datetime.combine(
-                current_time_gmt8.date(), datetime.strptime("15:00", "%H:%M").time()
-            )
-        )
-        return market_open_time, lunch_start_time, lunch_end_time, market_close_time
-
-
-# 创建 MarketTimeHelper 实例
-market_time_helper = MarketTimeHelper()
-
-
-# 修改相关函数调用
-def during_market_time(current_time):
-    today_gmt8 = datetime.now(pytz.timezone("Asia/Shanghai")).date()
-    return is_trade_date(today_gmt8) and market_time_helper.during_market_time(
-        current_time
-    )
-
-
-def minutes_since_market_open(current_time):
-    return market_time_helper.minutes_since_market_open(current_time)
 
 
 @st.cache_data(ttl=180)
@@ -374,7 +303,46 @@ def predict_volume(current_volume, current_time):
     return predicted_volume
 
 
-def streamlit():
+def steamlit_options():
+    st.title("300ETF期权分析")
+
+    # 300ETF期权分析
+    option_value_analysis_em_df = ak.option_value_analysis_em()
+    filtered_df = option_value_analysis_em_df[
+        option_value_analysis_em_df["期权名称"].str.contains("300ETF.*10月", regex=True)
+    ]
+    atm_options, avg_volatility, underlying_price = analyze_atm_options(filtered_df)
+
+    st.write(f"标的ETF价格: {underlying_price:.3f}")
+    st.write(f"平均ATM隐含波动率: :red[{avg_volatility:.2f}%]")
+    st.write("\nATM期权:")
+    # 按照期权类型（购和沽）和行权价排序
+    atm_options_sorted = atm_options.sort_values(by=["期权名称", "行权价"])
+
+    st.dataframe(
+        atm_options_sorted[["期权名称", "最新价", "隐含波动率", "行权价"]].reset_index(
+            drop=True
+        ),
+        use_container_width=True,
+    )
+
+    # 额外分析
+    call_options = atm_options[atm_options["期权名称"].str.contains("购")]
+    put_options = atm_options[atm_options["期权名称"].str.contains("沽")]
+
+    st.write(f"\nATM购期权平均隐含波动率: {call_options['隐含波动率'].mean():.2f}%")
+    st.write(f"ATM沽期权平均隐含波动率: {put_options['隐含波动率'].mean():.2f}%")
+
+    # 找到最接近ATM的期权
+    closest_option = atm_options.loc[
+        (atm_options["行权价"] - underlying_price).abs().idxmin()
+    ]
+    st.write(f"\n最接近ATM的期权: {closest_option['期权名称']}")
+    st.write(f"行权价: {closest_option['行权价']:.3f}")
+    st.write(f"隐含波动率: {closest_option['隐含波动率']:.2f}%")
+
+
+def streamlit_market_heat():
     logger.info("程序启动")
     # Streamlit 页面设置
     st.title("A股观测")
@@ -408,7 +376,7 @@ def streamlit():
 
     # 显示总成交额和预测总成交额
     st.write(f"### 当前总成交额: :red[{total_amount/1e8:.0f}] 亿 ###")
-    if is_trade_date(date.today()):
+    if is_trade_date(datetime.now(pytz.timezone("Asia/Shanghai")).date()):
         st.write(f"### 预计今日总成交额: :red[{total_pred/1e8:.0f}] 亿 ###")
 
     # 数据更新时间
@@ -434,6 +402,21 @@ def streamlit():
     if st.button("清除缓存"):
         st.cache_data.clear()
         st.success("缓存已清除")
+
+
+def streamlit():
+    st.set_page_config("成交量预测", layout="wide")
+    # Run the autorefresh about every 2000 milliseconds (2 seconds) and stop
+    # after it's been refreshed 100 times.
+    st_autorefresh(interval=60000, key="fizzbuzzcounter")
+    col1, col2 = st.columns([5, 5])
+    with col1:
+
+        streamlit_market_heat()
+
+    with col2:
+
+        steamlit_options()
 
 
 if __name__ == "__main__":
