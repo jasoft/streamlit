@@ -7,8 +7,8 @@ import pytz
 from streamlit_autorefresh import st_autorefresh
 
 from akcache import akshare as ak
-from stockview.options import analyze_atm_options
-from stockview.helpers import during_market_time, minutes_since_market_open
+from options import analyze_atm_options
+from helpers import during_market_time, minutes_since_market_open
 
 
 @st.cache_data(ttl=60)
