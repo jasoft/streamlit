@@ -1,4 +1,36 @@
 import re
+import pandas as pd
+import akshare
+from akcache import CacheWrapper
+from datetime import datetime
+
+ak = CacheWrapper(akshare, cache_time=180)
+
+
+def find_primary_options(etf):
+
+    # Sample DataFrame
+    df = ak.option_value_analysis_em()
+    # Convert '到期日' to datetime
+    df["到期日"] = pd.to_datetime(df["到期日"])
+
+    # Get today's date
+    today = pd.to_datetime(datetime.today().strftime("%Y-%m-%d"))
+
+    # Calculate the difference between '到期日' and today
+    df["diff"] = (df["到期日"] - today).abs()
+
+    # Filter the row with the minimum difference
+    # Sort the DataFrame by the 'diff' column
+    df_sorted = df.sort_values(by="diff")
+
+    # Filter out all rows which are the closest
+    primary_contract = df_sorted[
+        (df_sorted["diff"] == df_sorted["diff"].min())
+        & (df_sorted["期权名称"].str.contains(etf))
+    ]
+
+    return primary_contract
 
 
 def analyze_atm_options(data, price_range_percent=0.05):

@@ -5,10 +5,12 @@ from log import logger
 
 import pytz
 from streamlit_autorefresh import st_autorefresh
+import akshare
+from akcache import CacheWrapper
+from options import analyze_atm_options, find_primary_options
+from helpers import during_market_time, minutes_since_market_open, color_text
 
-from akcache import akshare as ak
-from options import analyze_atm_options
-from helpers import during_market_time, minutes_since_market_open
+ak = CacheWrapper(akshare, cache_time=180)
 
 
 @st.cache_data(ttl=60)
@@ -22,7 +24,6 @@ def is_trade_date(date):
     返回:
     bool: 如果是交易日，则返回 True；否则返回 False。
     """
-    logger.info(f"开始检查日期：{date}")
     try:
         stock_calendar = ak.tool_trade_date_hist_sina()
         stock_calendar_dates = pd.to_datetime(stock_calendar["trade_date"]).dt.date
@@ -39,7 +40,7 @@ def is_trade_date(date):
 
 # 只需要每天执行一次，获取成交量分时比例
 @st.cache_data(ttl=42000)
-def get_vol_curve(ndays):
+def get_amount_curve(ndays):
     """
     获取指定天数的成交量曲线。
 
@@ -78,14 +79,14 @@ def get_vol_curve(ndays):
 
         df = pd.concat([stock_zh_a_minute_df_sh, stock_zh_a_minute_df_sz], axis=1)
         df2 = df.iloc[:, [0, 5, 11]]
-        df2.columns = ["day", "volume_sh", "volume_sz"]
-        df2["volume_sh"] = pd.to_numeric(df2["volume_sh"])
-        df2["volume_sz"] = pd.to_numeric(df2["volume_sz"])
+        df2.columns = ["day", "amount_sh", "amount_sz"]
+        df2["amount_sh"] = pd.to_numeric(df2["amount_sh"])
+        df2["amount_sz"] = pd.to_numeric(df2["amount_sz"])
         df2["date"] = pd.to_datetime(
             df2["day"], infer_datetime_format=True
         )  # format='%Y-%m-%d %H:%M:%S'
-        df2["totalvolume"] = df2.apply(
-            lambda x: (x["volume_sh"] + x["volume_sz"]), axis=1
+        df2["totalamount"] = df2.apply(
+            lambda x: (x["amount_sh"] + x["amount_sz"]), axis=1
         )
         df2.drop(["day"], axis=1, inplace=True)
         df2 = df2[
@@ -97,12 +98,12 @@ def get_vol_curve(ndays):
         df_all = pd.DataFrame()
         for i in range(ndays):
             df_range = df2.iloc[i * 16 : (i + 1) * 16]
-            day_amount = df_range.totalvolume.sum()
+            day_amount = df_range.totalamount.sum()
             df_range["pct"] = df_range.apply(
-                lambda x: (x["totalvolume"] / day_amount), axis=1
+                lambda x: (x["totalamount"] / day_amount), axis=1
             )
             df_range.loc[:, "pct"] = df_range.apply(
-                lambda x: (x["totalvolume"] / day_amount), axis=1
+                lambda x: (x["totalamount"] / day_amount), axis=1
             )
             df_all = pd.concat([df_all, df_range])
         df_all = df_all.reset_index()
@@ -120,7 +121,7 @@ def get_vol_curve(ndays):
 
 
 @st.cache_data(ttl=180)
-def get_estimate_vol(minutes, vol=None):
+def get_estimate_amount(minutes, vol=None):
     """
     估算成交量。
 
@@ -145,7 +146,7 @@ def get_estimate_vol(minutes, vol=None):
     """
 
     logger.info(f"开始估算成交量，已交易分钟数：{minutes}，指定成交量：{vol}")
-    curve = get_vol_curve(3)
+    curve = get_amount_curve(3)
     df = pd.DataFrame(curve, columns=["amount"])
     t = minutes // 15
     if t > 15:
@@ -162,20 +163,20 @@ def get_estimate_vol(minutes, vol=None):
         raise
 
     if not vol:
-        total_vol = get_a_volume()
-        vol = total_vol[0] + total_vol[1]
+        total_amount = get_a_amount()
+        vol = total_amount[0] + total_amount[1]
         logger.info(f"自动获取成交量：{vol}")
     try:
-        estimated_vol = int(vol / a.iloc[0]) if vol > 0 else 0
-        logger.info(f"估算的成交量：{estimated_vol}")
-        return estimated_vol
+        estimated_amount = int(vol / a.iloc[0]) if vol > 0 else 0
+        logger.info(f"估算的成交量：{estimated_amount}")
+        return estimated_amount
     except ZeroDivisionError:
         logger.error("估算成交量时发生除零错误")
         return 0
 
 
-@st.cache_data(ttl=42000)
-def get_n_day_avg_volume(n):
+@st.cache_data(ttl=180)
+def get_n_day_avg_amount(n):
     """
     获取上证和深证指数最近 n 个交易日的平均成交额。
 
@@ -183,7 +184,7 @@ def get_n_day_avg_volume(n):
         n (int): 要计算的交易日天数。
 
     返回:
-        tuple: 包含上证和深证指数平均成交额的元组，格式为 (sh_avg_vol, sz_avg_vol)。
+        tuple: 包含上证和深证指数平均成交额的元组，格式为 (sh_avg_amount, sz_avg_amount)。
     """
     logger.info(f"开始获取最近 {n} 个交易日的平均成交额")
     try:
@@ -191,13 +192,13 @@ def get_n_day_avg_volume(n):
         stock_zh_a_daily_df_sz = ak.stock_zh_index_daily_em(symbol="sz399001")
         logger.info("成功获取上证和深证每日数据")
 
-        sh_vol = stock_zh_a_daily_df_sh["volume"].tail(n).mean()
-        sz_vol = stock_zh_a_daily_df_sz["volume"].tail(n).mean()
+        sh_amount = stock_zh_a_daily_df_sh["amount"].iloc[-6:-1].mean()
+        sz_amount = stock_zh_a_daily_df_sz["amount"].iloc[-6:-1].mean()
 
         logger.info(
-            f"最近 {n} 个交易日上证平均成交额: {sh_vol}, 深证平均成交额: {sz_vol}"
+            f"最近 {n} 个交易日上证平均成交额: {sh_amount}, 深证平均成交额: {sz_amount}"
         )
-        return sh_vol + sz_vol
+        return sh_amount + sz_amount
     except Exception as e:
         logger.error(f"获取最近 {n} 个交易日的平均成交额时发生错误：{str(e)}")
         return 0, 0
@@ -214,7 +215,7 @@ def get_index_price(symbol):
         return None
 
 
-def get_index_volume(symbol):
+def get_index_amount(symbol):
     try:
         df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
         df_sz = ak.stock_zh_index_spot_em(symbol="深证系列指数")
@@ -229,7 +230,7 @@ def get_index_volume(symbol):
 
 # 获取当前成交额
 @st.cache_data(ttl=180)
-def get_a_volume() -> tuple[float, float]:
+def get_a_amount() -> tuple[float, float]:
     """
     获取上证和深证指数的成交量。
 
@@ -237,7 +238,7 @@ def get_a_volume() -> tuple[float, float]:
     如果当前时间不在交易时间内，则将全局的 TTL 变量设置为 3600 秒。
 
     返回:
-        tuple: 包含上证和深证指数成交量的元组，格式为 (sh_vol, sz_vol)。
+        tuple: 包含上证和深证指数成交量的元组，格式为 (sh_amount, sz_amount)。
 
     异常:
         KeyError: 如果在获取的数据中未找到预期的股票代码（上证为 "000001"，深证为 "399001"）。
@@ -251,18 +252,18 @@ def get_a_volume() -> tuple[float, float]:
         logger.error(f"获取指数数据时发生错误：{str(e)}")
         return 0, 0
 
-    sh_vol = spot_df_sh[spot_df_sh["代码"] == "000001"]["成交额"].values[
+    sh_amount = spot_df_sh[spot_df_sh["代码"] == "000001"]["成交额"].values[
         0
     ]  # 上证成交额
-    sz_vol = spot_df_sz[spot_df_sz["代码"] == "399001"]["成交额"].values[
+    sz_amount = spot_df_sz[spot_df_sz["代码"] == "399001"]["成交额"].values[
         0
     ]  # 深证成交额
-    logger.info(f"获取上证和深证指数的成交量: 上证 {sh_vol}, 深证 {sz_vol}")
-    if pd.isna(sh_vol) or pd.isna(sz_vol):
+    logger.info(f"获取上证和深证指数的成交量: 上证 {sh_amount}, 深证 {sz_amount}")
+    if pd.isna(sh_amount) or pd.isna(sz_amount):
         logger.error("获取的成交量数据包含 NaN 值")
         return 0, 0
 
-    return sh_vol, sz_vol
+    return sh_amount, sz_amount
 
 
 @st.cache_data(ttl=180)
@@ -294,16 +295,87 @@ def middle_price_change():
 
 
 @st.cache_data(ttl=180)
-def top5_stock_vol_percent():
+def stock_up_down_ratio():
     """
-    计算前5%的股票对总成交量的贡献百分比。
+    计算股票的涨跌比。
 
-    该函数获取A股的实时交易数据，将股票按成交量降序排序，并计算总成交量。
-    然后确定构成前5%成交量的股票数量，并计算这些股票的总成交量。
-    最后，计算前5%的股票对总成交量的贡献百分比。
+    该函数获取A股的实时交易数据，并计算上涨股票数量与下跌股票数量的比值。
 
     返回:
-        float: 前5%的股票对总成交量的贡献百分比。如果总成交量为零，则返回0。
+        float: 股票的涨跌比。如果数据为空，则返回0。
+    """
+    df = ak.stock_zh_a_spot_em()
+    if df.empty:
+        logger.info("实时行情数据为空，无法计算涨跌比")
+        return 0
+
+    # 计算上涨和下跌股票的数量
+    up_stocks = df[df["涨跌幅"] >= 0].shape[0]
+    down_stocks = df[df["涨跌幅"] < 0].shape[0]
+    logger.info(f"上涨股票数量: {up_stocks}, 下跌股票数量: {down_stocks}")
+    if down_stocks == 0:
+        logger.info("没有下跌的股票，涨跌比为无穷大")
+        return float("inf")
+
+    up_down_ratio = up_stocks / down_stocks
+    logger.info(f"股票涨跌比为: {up_down_ratio}")
+
+    return up_down_ratio
+
+
+@st.cache_data(ttl=180)
+def top_n_stock_avg_price_change(n):
+    """
+    计算前 n% 成交金额的股票的平均涨幅。
+
+    该函数获取A股的实时交易数据，将股票按成交金额降序排序，并计算总成交金额。
+    然后确定构成前 n% 成交金额的股票数量，并计算这些股票的平均涨幅。
+
+    参数:
+        n (float): 要计算的股票百分比。
+
+    返回:
+        float: 前 n% 成交金额的股票的平均涨幅。如果数据为空，则返回0。
+    """
+    # 获取 A 股实时行情数据
+    # 序号	代码	名称	最新价	涨跌幅	涨跌额	成交量	成交额	振幅	最高	...	量比	换手率	市盈率-动态	市净率	总市值	流通市值	涨速	5分钟涨跌	60日涨跌幅	年初至今涨跌幅
+    df = ak.stock_zh_a_spot_em()
+    if df.empty:
+        logger.info("实时行情数据为空，无法计算平均涨幅")
+        return 0
+
+    # 按成交金额降序排序
+    df_sorted = df.sort_values("成交额", ascending=False)
+
+    # 计算前 n% 的股票数量
+    num_stocks = len(df)
+    top_n_percent = int(num_stocks * (n / 100))
+
+    # 计算前 n% 股票的平均涨幅
+    top_n_avg_price_change = (
+        df_sorted["涨跌幅"].head(top_n_percent)
+        * df_sorted["总市值"].head(top_n_percent)
+    ).sum() / df_sorted["总市值"].head(top_n_percent).sum()
+
+    logger.info(f"前 {n}% 成交金额的股票的平均涨幅为: {top_n_avg_price_change:.2f}%")
+
+    return top_n_avg_price_change
+
+
+@st.cache_data(ttl=180)
+def top_n_stock_amount_percent(n):
+    """
+    计算前 n% 的股票对总成交量的贡献百分比。
+
+    该函数获取A股的实时交易数据，将股票按成交量降序排序，并计算总成交量。
+    然后确定构成前 n% 成交量的股票数量，并计算这些股票的总成交量。
+    最后，计算前 n% 的股票对总成交量的贡献百分比。
+
+    参数:
+        n (float): 要计算的股票百分比。
+
+    返回:
+        float: 前 n% 的股票对总成交量的贡献百分比。如果总成交量为零，则返回0。
     """
 
     # 获取 A 股实时行情数据
@@ -311,52 +383,49 @@ def top5_stock_vol_percent():
     # 按成交量降序排序
     df_sorted = df.sort_values("成交量", ascending=False)
 
-    # 计算前5%的股票数量
+    # 计算前 n% 的股票数量
     num_stocks = len(df)
-    top_5_percent = int(num_stocks * 0.05)
+    top_n_percent = int(num_stocks * (n / 100))
 
     # 计算总成交量
-    total_volume = df["成交量"].sum()
+    total_amount = df["成交量"].sum()
 
-    if total_volume == 0:
+    if total_amount == 0:
         logger.info("总成交量为0, 可能是盘前，无法计算拥挤度")
         return 0
 
-    # 计算前5%股票的成交量总和
-    top_5_percent_volume = df_sorted["成交量"].head(top_5_percent).sum()
+    # 计算前 n% 股票的成交量总和
+    top_n_percent_amount = df_sorted["成交量"].head(top_n_percent).sum()
 
     # 计算拥挤度
-    crowdedness = top_5_percent_volume / total_volume
-    logger.info(f"前5%成交量的股票占总成交量的 {crowdedness*100:.2f}%")
+    crowdedness = top_n_percent_amount / total_amount
+    logger.info(f"前 {n}% 成交量的股票占总成交量的 {crowdedness*100:.2f}%")
 
     return crowdedness
 
 
 # 简单的预测模型
-def predict_volume(current_volume, current_time):
+def predict_amount(current_amount, current_time):
     if not during_market_time(current_time):
-        return current_volume  # 如果当前时间超过15:00，返回当前成交额作为预测值
+        return current_amount  # 如果当前时间超过15:00，返回当前成交额作为预测值
 
     elapsed_minutes = minutes_since_market_open(current_time)
 
-    # 使用 get_estimate_vol 获取预测的成交额
-    predicted_volume = get_estimate_vol(elapsed_minutes, current_volume)
+    # 使用 get_estimate_amount 获取预测的成交额
+    predicted_amount = get_estimate_amount(elapsed_minutes, current_amount)
 
-    return predicted_volume
+    return predicted_amount
 
 
-def steamlit_options():
-    st.title("300ETF期权分析")
+def streamlit_options(etf):
+    st.title(f"{etf}期权分析")
 
     # 300ETF期权分析
-    option_value_analysis_em_df = ak.option_value_analysis_em()
-    filtered_df = option_value_analysis_em_df[
-        option_value_analysis_em_df["期权名称"].str.contains("300ETF.*10月", regex=True)
-    ]
-    atm_options, avg_volatility, underlying_price = analyze_atm_options(filtered_df)
+    filtered_df = find_primary_options(etf)
+    atm_options, avg_amountatility, underlying_price = analyze_atm_options(filtered_df)
 
     st.write(f"标的ETF价格: {underlying_price:.3f}")
-    st.write(f"平均ATM隐含波动率: :red[{avg_volatility:.2f}%]")
+    st.write(f"平均ATM隐含波动率: :red[{avg_amountatility:.2f}%]")
     st.write("\nATM期权:")
     # 按照期权类型（购和沽）和行权价排序
     atm_options_sorted = atm_options.sort_values(by=["期权名称", "行权价"])
@@ -391,65 +460,90 @@ def streamlit_market_heat():
 
     # 获取当前成交额
     logger.info("开始获取当前成交额")
-    sh_vol, sz_vol = get_a_volume()
+    sh_amount, sz_amount = get_a_amount()
 
     # 当前时间
     current_time = datetime.now()
 
     # 预测成交额
-    sh_pred = predict_volume(sh_vol, current_time)
-    sz_pred = predict_volume(sz_vol, current_time)
+    sh_pred = predict_amount(sh_amount, current_time)
+    sz_pred = predict_amount(sz_amount, current_time)
 
-    # 显示预测的成交额
-    # if is_trade_date(date.today()):
-    #     st.markdown(
-    #         f"**预计上证总成交额:** :red[{sh_pred/1e8:.0f}] 亿 **预计深证总成交额:** :red[{sz_pred/1e8:.0f}] 亿"
-    #     )
-    # 插入分割线
-    st.markdown("---")
     # 计算总成交额和预测总成交额
-    total_amount = sh_vol + sz_vol
+    total_amount = sh_amount + sz_amount
     total_pred = sh_pred + sz_pred
 
     # 创业板成交占比（散户跟风指标）
-    cyb_volume = get_index_volume("399006")
-    # 显示当前的成交额
-    st.write(
-        f"**上证成交额:** :red[{sh_vol/1e8:.0f}] 亿  **深证成交额:** :red[{sz_vol/1e8:.0f}] 亿 **创业板成交额:** :red[{cyb_volume/1e8:.0f}] 亿"
-    )
+    cyb_amount = get_index_amount("399006")
 
-    # 显示总成交额和预测总成交额
-    st.write(f"### 当前总成交额: :red[{total_amount/1e8:.0f}] 亿 ###")
     # 计算创业板成交占总成交比例
-    cyb_ratio = cyb_volume / total_amount * 100
-    st.write(f"### 创业板成交占总成交比例：:red[{cyb_ratio:.2f}%] ###")
+    cyb_ratio = cyb_amount / total_amount * 100
 
-    if is_trade_date(datetime.now(pytz.timezone("Asia/Shanghai")).date()):
-        st.write(f"### 预计今日总成交额: :red[{total_pred/1e8:.0f}] 亿 ###")
-    st.write(f"### 5日均值: :red[{get_n_day_avg_volume(5)/1e5:.0f}] 亿 ###")
-
-    # 数据更新时间
-    # 数据更新时间
-    updated_at = current_time.astimezone(pytz.timezone("Asia/Shanghai")).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-    status = "（非交易时间）" if not during_market_time(current_time) else ""
-    crowdedness = top5_stock_vol_percent() * 100
+    # 获取5日均值
+    avg_5_day = get_n_day_avg_amount(5)
 
     # 拥挤度，算法参见https://legulegu.com/stockdata/ashares-congestion
-    if crowdedness > 50:
-        st.write(f"### 交易拥挤度：:red[{crowdedness:.2f}] ###")
-    else:
-        st.write(f"### 交易拥挤度：:green[{crowdedness:.2f}] ###")
+    crowdedness = top_n_stock_amount_percent(5) * 100
 
     # 中间股票涨幅
     middle_price_change_value = middle_price_change()
-    st.write(f"### 中位数股票涨幅：:red[{middle_price_change_value:.2f}%] ###")
 
-    st.caption(f"数据更新于: {updated_at} {status}")
+    # top5 成交额股票平均涨幅
+    top5_avg_price_change = top_n_stock_avg_price_change(5)
+    # 股票涨跌比
+    up_down_ratio = stock_up_down_ratio()
+
+    # 创建数据字典
+    data = {
+        "指标": [
+            "上证成交额",
+            "深证成交额",
+            "创业板成交额",
+            "当前总成交额",
+            "创业板成交占总成交比例",
+            "预计今日总成交额",
+            "5日均值",
+            "交易拥挤度",
+            "中位数股票涨幅",
+            "前 5% 成交加权涨幅",
+            "股票涨跌比",
+        ],
+        "数值": [
+            f"{sh_amount/1e8:.0f} 亿",
+            f"{sz_amount/1e8:.0f} 亿",
+            f"{cyb_amount/1e8:.0f} 亿",
+            f"{total_amount/1e8:.0f} 亿",
+            f"{cyb_ratio:.2f}%",
+            (
+                color_text(f"{total_pred/1e8:.0f} 亿", lambda: total_pred > 10000)
+                if is_trade_date(datetime.now(pytz.timezone("Asia/Shanghai")).date())
+                else "N/A"
+            ),
+            f"{avg_5_day/1e8:.0f} 亿",
+            color_text(f"{crowdedness:.2f}", lambda: crowdedness < 50),
+            color_text(
+                f"{middle_price_change_value:.2f}%",
+                lambda: middle_price_change_value > 0,
+            ),
+            color_text(
+                f"{top5_avg_price_change:.2f}%", lambda: top5_avg_price_change > 0
+            ),
+            color_text(f"{up_down_ratio:.2f}", lambda: up_down_ratio > 1),
+        ],
+    }
+
+    # 分成两列显示，左边显示指标，右边显示数值
+    col1, col2 = st.columns([2, 4])
+    with col1:
+        for item in data["指标"]:
+            st.write(f"#### {item} ####")
+    with col2:
+        for value in data["数值"]:
+            st.write(f"#### {value}")
 
     if st.button("清除缓存"):
         st.cache_data.clear()
+        ak.clear_cache()
         st.success("缓存已清除")
 
 
@@ -465,7 +559,15 @@ def streamlit():
 
     with col2:
 
-        steamlit_options()
+        streamlit_options("300ETF")
+
+    # 数据更新时间
+    current_time = datetime.now()
+    updated_at = current_time.astimezone(pytz.timezone("Asia/Shanghai")).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    status = "（非交易时间）" if not during_market_time(current_time) else ""
+    st.write("数据更新时间:", updated_at, status)
 
 
 if __name__ == "__main__":

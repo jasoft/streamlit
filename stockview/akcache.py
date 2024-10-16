@@ -1,40 +1,38 @@
-import akshare as ak
-import functools
 import time
 from log import logger
 
 
-class AkshareWrapper:
-    def __init__(self, max_cache_size=128, cache_expire_seconds=60):
-        self.cache_expire_seconds = cache_expire_seconds
-        self.get_data = functools.lru_cache(maxsize=max_cache_size)(
-            self._cached_get_data
-        )
+class CacheWrapper:
+    def __init__(self, obj, cache_time=180):
+        self.obj = obj
+        self.cache_time = cache_time
+        self.cache = {}
 
     def __getattr__(self, name):
-        def wrapper_function(*args, **kwargs):
-            return self.get_data_with_cache(name, *args, **kwargs)
+        method = getattr(self.obj, name)
 
-        return wrapper_function
-
-    def _cached_get_data(self, function_name, *args, **kwargs):
-        # 调用 akshare 中的函数
-        function = getattr(ak, function_name)
-        return function(*args, **kwargs)
-
-    def get_data_with_cache(self, function_name, *args, **kwargs):
-        # 手动控制缓存过期
-        cache_info = self.get_data.cache_info()
-        if cache_info.hits + cache_info.misses > 0:
+        def cached_method(*args, **kwargs):
+            key = (name, args, tuple(kwargs.items()))  # 创建缓存键
             current_time = time.time()
-            if not hasattr(self, "_cache_timestamp"):
-                self._cache_timestamp = current_time
-                if current_time - self._cache_timestamp > self.cache_expire_seconds:
-                    self.get_data.cache_clear()
-                    self._cache_timestamp = current_time
-        logger.info(f"调用 akshare 函数: {function_name} {args} {kwargs}")
-        return self.get_data(function_name, *args, **kwargs)
+
+            # 检查缓存是否存在且未过期
+            if key in self.cache:
+                cached_result, timestamp = self.cache[key]
+                if current_time - timestamp < self.cache_time:
+                    logger.debug(f"缓存命中: {name}")
+                    return cached_result
+
+            # 如果缓存不存在或过期，调用方法并缓存结果
+            logger.debug(f"缓存未命中, 正在调用方法 {name} {args} {kwargs}")
+            result = method(*args, **kwargs)
+            self.cache[key] = (result, current_time)
+            return result
+
+        return cached_method
+
+    def clear_cache(self):
+        self.cache.clear()  # 清空缓存
+        logger.info("缓存已清空")
 
 
 # 示例使用
-akshare = AkshareWrapper(cache_expire_seconds=180)

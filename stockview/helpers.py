@@ -66,3 +66,10 @@ def during_market_time(current_time):
 
 def minutes_since_market_open(current_time):
     return market_time_helper.minutes_since_market_open(current_time)
+
+
+def color_text(s, cap):
+    if cap():
+        return f":red[{s}]"
+    else:
+        return f":green[{s}]"

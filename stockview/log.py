@@ -4,7 +4,8 @@ import logging
 coloredlogs.install(level="INFO")
 
 logger = logging.getLogger("streamlit.stockview")
-
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("fsevents").setLevel(logging.WARNING)
 # 配置日志记录
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
