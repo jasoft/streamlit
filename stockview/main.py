@@ -9,6 +9,7 @@ import akshare
 from akcache import CacheWrapper
 from options import analyze_atm_options, find_primary_options
 from helpers import during_market_time, minutes_since_market_open, color_text
+import matplotlib.pyplot as plt
 
 ak = CacheWrapper(akshare, cache_time=180)
 
@@ -78,7 +79,7 @@ def get_amount_curve(ndays):
         logger.info("成功获取上证和深证分钟数据")
 
         df = pd.concat([stock_zh_a_minute_df_sh, stock_zh_a_minute_df_sz], axis=1)
-        df2 = df.iloc[:, [0, 5, 11]]
+        df2 = df.iloc[:, [0, 5, 11]].copy(deep=True)
         df2.columns = ["day", "amount_sh", "amount_sz"]
         df2["amount_sh"] = pd.to_numeric(df2["amount_sh"])
         df2["amount_sz"] = pd.to_numeric(df2["amount_sz"])
@@ -219,7 +220,8 @@ def get_index_amount(symbol):
     try:
         df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
         df_sz = ak.stock_zh_index_spot_em(symbol="深证系列指数")
-        df = pd.concat([df_sh, df_sz], axis=0)
+        df_csi = ak.stock_zh_index_spot_em(symbol="中证系列指数")
+        df = pd.concat([df_sh, df_sz, df_csi], axis=0)
 
         index_value = df[df["代码"] == symbol]["成交额"].values[0]
         return index_value
@@ -295,6 +297,36 @@ def middle_price_change():
 
 
 @st.cache_data(ttl=180)
+def count_limit_up_stocks():
+    """
+    计算涨停板股票的数量。
+
+    该函数获取A股的实时交易数据，并计算涨停板（涨幅达到10%或以上）的股票数量。
+
+    返回:
+        int: 涨停板股票的数量。如果数据为空，则返回0。
+    """
+    df = ak.stock_zh_a_spot_em()
+    if df.empty:
+        logger.info("实时行情数据为空，无法计算涨停板数量")
+        return 0
+
+    # 计算涨停板股票的数量，30 开头和 68 开头的是 20% 涨停，其他是 10% 涨停
+    df["涨停板"] = df.apply(
+        lambda row: (
+            row["涨跌幅"] >= 19.9
+            if row["代码"].startswith(("30", "68"))
+            else row["涨跌幅"] >= 9.9
+        ),
+        axis=1,
+    )
+    limit_up_stocks = df[df["涨停板"] & ~df["代码"].str.startswith("8")].shape[0]
+    logger.info(f"涨停板股票数量: {limit_up_stocks}")
+
+    return limit_up_stocks
+
+
+@st.cache_data(ttl=180)
 def stock_up_down_ratio():
     """
     计算股票的涨跌比。
@@ -309,6 +341,9 @@ def stock_up_down_ratio():
         logger.info("实时行情数据为空，无法计算涨跌比")
         return 0
 
+    # 计算股票总数
+    num_stocks = len(df)
+
     # 计算上涨和下跌股票的数量
     up_stocks = df[df["涨跌幅"] >= 0].shape[0]
     down_stocks = df[df["涨跌幅"] < 0].shape[0]
@@ -317,8 +352,8 @@ def stock_up_down_ratio():
         logger.info("没有下跌的股票，涨跌比为无穷大")
         return float("inf")
 
-    up_down_ratio = up_stocks / down_stocks
-    logger.info(f"股票涨跌比为: {up_down_ratio}")
+    up_down_ratio = (up_stocks / num_stocks) * 100
+    logger.info(f"股票上涨百分比为: {up_down_ratio}")
 
     return up_down_ratio
 
@@ -351,15 +386,20 @@ def top_n_stock_avg_price_change(n):
     num_stocks = len(df)
     top_n_percent = int(num_stocks * (n / 100))
 
-    # 计算前 n% 股票的平均涨幅
-    top_n_avg_price_change = (
+    # 计算前 n% 股票的加权平均涨幅
+    top_n_weighted_avg_price_change = (
         df_sorted["涨跌幅"].head(top_n_percent)
         * df_sorted["总市值"].head(top_n_percent)
     ).sum() / df_sorted["总市值"].head(top_n_percent).sum()
 
+    # 计算前 n% 股票的算数平均涨幅，去除涨幅超过31%的股票
+    top_n_avg_price_change = (
+        df_sorted[df_sorted["涨跌幅"] < 31]["涨跌幅"].head(top_n_percent).mean()
+    )
+
     logger.info(f"前 {n}% 成交金额的股票的平均涨幅为: {top_n_avg_price_change:.2f}%")
 
-    return top_n_avg_price_change
+    return top_n_weighted_avg_price_change, top_n_avg_price_change
 
 
 @st.cache_data(ttl=180)
@@ -456,7 +496,6 @@ def streamlit_options(etf):
 def streamlit_market_heat():
     logger.info("程序启动")
     # Streamlit 页面设置
-    st.title("A股观测")
 
     # 获取当前成交额
     logger.info("开始获取当前成交额")
@@ -479,6 +518,18 @@ def streamlit_market_heat():
     # 计算创业板成交占总成交比例
     cyb_ratio = cyb_amount / total_amount * 100
 
+    # 沪深 300 成交占比
+    hs300_amount = get_index_amount("000300")
+    hs300_ratio = hs300_amount / total_amount * 100
+
+    # 中证 1000 成交占比
+    zz1000_amount = get_index_amount("399852")
+    zz1000_ratio = zz1000_amount / total_amount * 100
+
+    # 中证 2000 成交占比
+    zz2000_amount = get_index_amount("932000")
+    zz2000_ratio = zz2000_amount / total_amount * 100
+
     # 获取5日均值
     avg_5_day = get_n_day_avg_amount(5)
 
@@ -488,8 +539,10 @@ def streamlit_market_heat():
     # 中间股票涨幅
     middle_price_change_value = middle_price_change()
 
-    # top5 成交额股票平均涨幅
-    top5_avg_price_change = top_n_stock_avg_price_change(5)
+    # top5 成交额股票平均涨幅和加权平均涨幅
+    top5_weighted_avg_price_change, top5_avg_price_change = (
+        top_n_stock_avg_price_change(5)
+    )
     # 股票涨跌比
     up_down_ratio = stock_up_down_ratio()
 
@@ -501,12 +554,17 @@ def streamlit_market_heat():
             "创业板成交额",
             "当前总成交额",
             "创业板成交占总成交比例",
+            "中证 1000 成交占总成交比例",
+            "中证 2000 成交占总成交比例",
+            "沪深 300 成交占总成交比例",
             "预计今日总成交额",
             "5日均值",
             "交易拥挤度",
             "中位数股票涨幅",
             "前 5% 成交加权涨幅",
-            "股票涨跌比",
+            "前 5% 成交算数涨幅",
+            "股票上涨百分比",
+            "涨停板股票数量",
         ],
         "数值": [
             f"{sh_amount/1e8:.0f} 亿",
@@ -514,6 +572,9 @@ def streamlit_market_heat():
             f"{cyb_amount/1e8:.0f} 亿",
             f"{total_amount/1e8:.0f} 亿",
             f"{cyb_ratio:.2f}%",
+            f"{zz1000_ratio:.2f}%",
+            f"{zz2000_ratio:.2f}%",
+            f"{hs300_ratio:.2f}%",
             (
                 color_text(f"{total_pred/1e8:.0f} 亿", lambda: total_pred > 10000)
                 if is_trade_date(datetime.now(pytz.timezone("Asia/Shanghai")).date())
@@ -526,20 +587,32 @@ def streamlit_market_heat():
                 lambda: middle_price_change_value > 0,
             ),
             color_text(
-                f"{top5_avg_price_change:.2f}%", lambda: top5_avg_price_change > 0
+                f"{top5_weighted_avg_price_change:.2f}%",
+                lambda: top5_weighted_avg_price_change > 0,
             ),
-            color_text(f"{up_down_ratio:.2f}", lambda: up_down_ratio > 1),
+            color_text(
+                f"{top5_avg_price_change :.2f}%", lambda: top5_avg_price_change > 0
+            ),
+            color_text(f"{up_down_ratio:.2f}%", lambda: up_down_ratio > 50),
+            count_limit_up_stocks(),
         ],
     }
 
     # 分成两列显示，左边显示指标，右边显示数值
-    col1, col2 = st.columns([2, 4])
-    with col1:
-        for item in data["指标"]:
-            st.write(f"#### {item} ####")
-    with col2:
-        for value in data["数值"]:
-            st.write(f"#### {value}")
+    # col1, col2 = st.columns([2, 4])
+    # with col1:
+    #     for item in data["指标"]:
+    #         st.write(f"#### {item} ####")
+    # with col2:
+    #     for value in data["数值"]:
+    #         st.write(f"#### {value}")
+    st.header("成交额")
+    for item, value in zip(data["指标"][4:10], data["数值"][4:10]):
+        st.write(f"{item}: {value}")
+
+    st.header("情绪指标")
+    for item, value in zip(data["指标"][10:], data["数值"][10:]):
+        st.write(f"{item}: {value}")
 
     if st.button("清除缓存"):
         st.cache_data.clear()
@@ -548,18 +621,19 @@ def streamlit_market_heat():
 
 
 def streamlit():
-    st.set_page_config("成交量预测", layout="wide")
+    st.set_page_config("成交量预测", "📈")
     # Run the autorefresh about every 2000 milliseconds (2 seconds) and stop
     # after it's been refreshed 100 times.
     st_autorefresh(interval=60000, key="fizzbuzzcounter")
     col1, col2 = st.columns([5, 5])
-    with col1:
-
-        streamlit_market_heat()
-
-    with col2:
-
-        streamlit_options("300ETF")
+    try:
+        with col1:
+            streamlit_market_heat()
+        with col2:
+            streamlit_options("300ETF")
+    except Exception as e:
+        st.info("市场正在初始化，无数据。")
+        logger.error(f"执行过程中发生错误：{str(e)}")
 
     # 数据更新时间
     current_time = datetime.now()
