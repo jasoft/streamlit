@@ -93,7 +93,7 @@ bins = [i / 100 for i in range(16, 30, 1)]  # 从0.15到0.4，步长为0.01
 df["中证1000占比分组"] = pd.cut(df["中证1000占比"], bins)
 
 # 计算每个组别中中证1000相对沪深300涨幅为正的比例
-grouped = df.groupby("中证1000占比分组")["中证1000相对沪深300涨幅"].agg(
+grouped = df.groupby("中证1000占比分组", observed=False)["中证1000相对沪深300涨幅"].agg(
     比例=lambda x: (x > 0.3).mean(), 总天数="count"
 )
 
