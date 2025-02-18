@@ -2,16 +2,17 @@ import streamlit as st
 from datetime import date, datetime
 import pandas as pd
 from log import logger
-
 import pytz
-from streamlit_autorefresh import st_autorefresh
+
+# from streamlit_autorefresh import st_autorefresh
 import akshare
 from akcache import CacheWrapper
 from options import analyze_atm_options, find_primary_options
 from helpers import during_market_time, minutes_since_market_open, color_text
-import matplotlib.pyplot as plt
+from streamlit_autorefresh import st_autorefresh
 
 ak = CacheWrapper(akshare, cache_time=180)
+st.set_page_config("成交量预测", "📈")
 
 
 @st.cache_data(ttl=60)
@@ -327,6 +328,36 @@ def count_limit_up_stocks():
 
 
 @st.cache_data(ttl=180)
+def count_limit_down_stocks():
+    """
+    计算跌停板股票的数量。
+
+    该函数获取A股的实时交易数据，并计算跌停板（跌幅达到10%或以上）的股票数量。
+
+    返回:
+        int: 跌停板股票的数量。如果数据为空，则返回0。
+    """
+    df = ak.stock_zh_a_spot_em()
+    if df.empty:
+        logger.info("实时行情数据为空，无法计算跌停板数量")
+        return 0
+
+    # 计算跌停板股票的数量，30 开头和 68 开头的是 20% 跌停，其他是 10% 跌停
+    df["跌停板"] = df.apply(
+        lambda row: (
+            row["涨跌幅"] <= -19.9
+            if row["代码"].startswith(("30", "68"))
+            else row["涨跌幅"] <= -9.9
+        ),
+        axis=1,
+    )
+    limit_down_stocks = df[df["跌停板"] & ~df["代码"].str.startswith("8")].shape[0]
+    logger.info(f"跌停板股票数量: {limit_down_stocks}")
+
+    return limit_down_stocks
+
+
+@st.cache_data(ttl=180)
 def stock_up_down_ratio():
     """
     计算股票的涨跌比。
@@ -493,7 +524,7 @@ def streamlit_options(etf):
     st.write(f"隐含波动率: {closest_option['隐含波动率']:.2f}%")
 
 
-def streamlit_market_heat():
+def get_market_heat():
     logger.info("程序启动")
     # Streamlit 页面设置
 
@@ -565,6 +596,7 @@ def streamlit_market_heat():
             "前 5% 成交算数涨幅",
             "股票上涨百分比",
             "涨停板股票数量",
+            "跌停板股票数量",
         ],
         "数值": [
             f"{sh_amount/1e8:.0f} 亿",
@@ -595,9 +627,17 @@ def streamlit_market_heat():
             ),
             color_text(f"{up_down_ratio:.2f}%", lambda: up_down_ratio > 50),
             count_limit_up_stocks(),
+            count_limit_down_stocks(),
         ],
     }
 
+    return data
+
+
+placeholder = st.empty()
+
+
+def streamlit_market_heat():
     # 分成两列显示，左边显示指标，右边显示数值
     # col1, col2 = st.columns([2, 4])
     # with col1:
@@ -606,6 +646,8 @@ def streamlit_market_heat():
     # with col2:
     #     for value in data["数值"]:
     #         st.write(f"#### {value}")
+
+    data = get_market_heat()
     st.header("成交额")
     for item, value in zip(data["指标"][4:10], data["数值"][4:10]):
         st.write(f"{item}: {value}")
@@ -620,20 +662,12 @@ def streamlit_market_heat():
         st.success("缓存已清除")
 
 
-def streamlit():
-    st.set_page_config("成交量预测", "📈")
-    # Run the autorefresh about every 2000 milliseconds (2 seconds) and stop
-    # after it's been refreshed 100 times.
-    st_autorefresh(interval=60000, key="fizzbuzzcounter")
-    col1, col2 = st.columns([5, 5])
-    try:
-        with col1:
-            streamlit_market_heat()
-        with col2:
-            streamlit_options("300ETF")
-    except Exception as e:
-        st.info("市场正在初始化，无数据。")
-        logger.error(f"执行过程中发生错误：{str(e)}")
+def streamlit_app():
+    # Run the autorefresh about every 2000 milliseconds (2 seconds)
+    st_autorefresh(interval=60000, key="data_refresh")
+
+    streamlit_market_heat()
+
 
     # 数据更新时间
     current_time = datetime.now()
@@ -645,4 +679,4 @@ def streamlit():
 
 
 if __name__ == "__main__":
-    streamlit()
+    streamlit_app()

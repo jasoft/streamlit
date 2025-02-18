@@ -4,7 +4,7 @@ import os
 # 获取上级目录路径
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, parent_dir)
-from akcache import akshare as ak
+from stockview.akcache.akcache import akshare as ak
 import pandas as pd
 import streamlit as st
 import altair as alt

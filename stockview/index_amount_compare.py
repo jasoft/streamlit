@@ -1,6 +1,6 @@
 import streamlit as st
 import akshare
-from akcache import CacheWrapper
+from stockview.akcache.akcache import CacheWrapper
 import pandas as pd
 from datetime import datetime, timedelta
 import altair as alt

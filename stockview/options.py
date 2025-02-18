@@ -8,7 +8,6 @@ ak = CacheWrapper(akshare, cache_time=180)
 
 
 def find_primary_options(etf):
-
     # Sample DataFrame
     df = ak.option_value_analysis_em()
     # Convert '到期日' to datetime
