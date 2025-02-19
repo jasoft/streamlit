@@ -2,3 +2,4 @@
 /.vscode
 /stockview.log
 __pycache__
+stockview/stockview.log
