@@ -524,6 +524,91 @@ def streamlit_options(etf):
     st.write(f"隐含波动率: {closest_option['隐含波动率']:.2f}%")
 
 
+@st.cache_data(ttl=180)
+def get_top_n_popular_stocks(n):
+    """
+    获取成交额前 N 的股票详细信息和统计数据。
+
+    参数:
+        n (int): 获取前 N 只股票的信息
+
+    返回:
+        df: 包含前 N 只股票的详细信息和统计数据的 DataFrame。
+    """
+    try:
+        # 获取 A 股实时行情数据
+        df = ak.stock_zh_a_spot_em()
+        if df.empty:
+            logger.info("实时行情数据为空")
+            return None
+
+        # 按成交额降序排序
+        df_sorted = df.sort_values("成交额", ascending=False)
+
+        # 获取前 N 只股票
+        top_n_stocks = df_sorted.head(n).copy()
+
+        # 选择需要的列并重命名
+        result_df = top_n_stocks[
+            ["代码", "名称", "最新价", "涨跌幅", "成交额", "总市值", "换手率"]
+        ].copy()
+
+        # 格式化数值
+        result_df["涨跌幅"] = result_df["涨跌幅"].apply(lambda x: f"{x:.2f}%")
+        result_df["换手率"] = result_df["换手率"].apply(lambda x: f"{x:.2f}%")
+        result_df["成交额"] = (result_df["成交额"] / 1e8).apply(lambda x: f"{int(x)}亿")
+        result_df["总市值"] = (result_df["总市值"] / 1e8).apply(lambda x: f"{int(x)}亿")
+        result_df["最新价"] = result_df["最新价"].apply(lambda x: f"{x:.2f}")
+
+        # 设置索引为名称，但不显示索引名
+        result_df.set_index("名称", inplace=True)
+
+        return result_df
+
+    except Exception as e:
+        logger.error(f"获取股票信息时发生错误：{str(e)}")
+        return None
+
+
+@st.cache_data(ttl=180)
+def calculate_top_n_stocks_avg_market_value(n):
+    """
+    计算成交额前N的股票的平均市值。
+
+    参数:
+        n (int): 要计算的股票数量
+
+    返回:
+        tuple: (avg_market_value, total_market_value, stocks_count)
+        - avg_market_value: 平均市值（亿元）
+        - total_market_value: 总市值（亿元）
+        - stocks_count: 实际统计的股票数量
+    """
+    try:
+        logger.info(f"开始计算前{n}只股票的平均市值")
+        df = ak.stock_zh_a_spot_em()
+
+        if df.empty:
+            logger.warning("获取到的股票数据为空")
+            return 0, 0, 0
+
+        # 按成交额降序排序并获取前N只
+        df_sorted = df.sort_values("成交额", ascending=False).head(n)
+
+        # 计算市值（转换为亿元）
+        total_market_value = df_sorted["总市值"].sum() / 1e8
+        avg_market_value = df_sorted["总市值"].mean() / 1e8
+        stocks_count = len(df_sorted)
+
+        logger.info(f"前{stocks_count}只股票平均市值: {avg_market_value:.2f}亿")
+        logger.info(f"前{stocks_count}只股票总市值: {total_market_value:.2f}亿")
+
+        return avg_market_value, total_market_value, stocks_count
+    except Exception as e:
+        logger.error(f"计算平均市值时发生错误: {str(e)}")
+        return 0, 0, 0
+
+
 def get_market_heat():
     logger.info("程序启动")
     # Streamlit 页面设置
@@ -577,6 +662,18 @@ def get_market_heat():
     # 股票涨跌比
     up_down_ratio = stock_up_down_ratio()
 
+    # 涨停数量
+    limit_up_count = count_limit_up_stocks()
+    # 跌停数量
+    limit_down_count = count_limit_down_stocks()
+
+    # 计算前10只股票的平均市值
+    avg_market_value, total_market_value, stocks_count = (
+        calculate_top_n_stocks_avg_market_value(10)
+    )
+    # 显示前10只活跃股票的详细信息
+    top_stocks = get_top_n_popular_stocks(10)
+
     # 创建数据字典
     data = {
         "指标": [
@@ -597,6 +694,8 @@ def get_market_heat():
             "股票上涨百分比",
             "涨停板股票数量",
             "跌停板股票数量",
+            f"前{stocks_count}大成交额股票平均市值",
+            f"前{stocks_count}大成交额股票活跃度",
         ],
         "数值": [
             f"{sh_amount/1e8:.0f} 亿",
@@ -626,40 +725,62 @@ def get_market_heat():
                 f"{top5_avg_price_change :.2f}%", lambda: top5_avg_price_change > 0
             ),
             color_text(f"{up_down_ratio:.2f}%", lambda: up_down_ratio > 50),
-            count_limit_up_stocks(),
-            count_limit_down_stocks(),
+            limit_up_count,
+            limit_down_count,
+            f"{int(avg_market_value)}亿",
+            top_stocks,
         ],
     }
 
     return data
 
 
-placeholder = st.empty()
+placeholder = st.empty()  # 创建一个空白区域
+
+
+def color_negative_red(val):
+    try:
+        val = float(val.rstrip("%"))
+    except ValueError:
+        return ""
+    color = "red" if val > 0 else "green"
+    return f"color: {color}"
 
 
 def streamlit_market_heat():
-    # 分成两列显示，左边显示指标，右边显示数值
-    # col1, col2 = st.columns([2, 4])
-    # with col1:
-    #     for item in data["指标"]:
-    #         st.write(f"#### {item} ####")
-    # with col2:
-    #     for value in data["数值"]:
-    #         st.write(f"#### {value}")
-
     data = get_market_heat()
-    st.header("成交额")
-    for item, value in zip(data["指标"][4:10], data["数值"][4:10]):
-        st.write(f"{item}: {value}")
 
-    st.header("情绪指标")
-    for item, value in zip(data["指标"][10:], data["数值"][10:]):
-        st.write(f"{item}: {value}")
+    # 创建两列
+    col1, col2 = st.columns([2, 2])
 
-    if st.button("清除缓存"):
-        st.cache_data.clear()
-        ak.clear_cache()
-        st.success("缓存已清除")
+    with col1:
+        # 左栏显示成交额和情绪指标
+        st.header("成交额")
+        for item, value in zip(data["指标"][0:10], data["数值"][0:10]):
+            st.write(f"{item}: {value}")
+
+        st.header("情绪指标")
+        for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
+            st.write(f"{item}: {value}")
+
+        if st.button("清除缓存"):
+            st.cache_data.clear()
+            ak.clear_cache()
+            st.success("缓存已清除")
+
+    with col2:
+        # 右栏显示龙头股分析
+        st.header("龙头股分析")
+        st.write(f"{data['指标'][17]}: {data['数值'][17]}")
+        if data["数值"][18] is not None:
+            styled_df = data["数值"][18].style.map(
+                color_negative_red, subset=["涨跌幅"]
+            )
+            st.dataframe(
+                styled_df,
+                use_container_width=True,
+                hide_index=False,  # 显示股票名称作为索引
+            )
 
 
 def streamlit_app():
@@ -667,7 +788,6 @@ def streamlit_app():
     st_autorefresh(interval=60000, key="data_refresh")
 
     streamlit_market_heat()
-
 
     # 数据更新时间
     current_time = datetime.now()
