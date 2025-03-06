@@ -701,6 +701,19 @@ wheels = [
 ]
 
 [[package]]
+name = "plotly"
+version = "6.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "narwhals" },
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9c/80/761c14012d6daf18e12b6d1e4f6b218e999bcceb694d7a9b180154f9e4db/plotly-6.0.0.tar.gz", hash = "sha256:c4aad38b8c3d65e4a5e7dd308b084143b9025c2cc9d5317fc1f1d30958db87d3", size = 8111782 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/77/a946f38b57fb88e736c71fbdd737a1aebd27b532bda0779c137f357cf5fc/plotly-6.0.0-py3-none-any.whl", hash = "sha256:f708871c3a9349a68791ff943a5781b1ec04de7769ea69068adcd9202e57653a", size = 14805949 },
+]
+
+[[package]]
 name = "protobuf"
 version = "5.29.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1010,6 +1023,7 @@ dependencies = [
     { name = "akshare" },
     { name = "coloredlogs" },
     { name = "pandas" },
+    { name = "plotly" },
     { name = "pytz" },
     { name = "streamlit" },
     { name = "streamlit-autorefresh" },
@@ -1020,6 +1034,7 @@ requires-dist = [
     { name = "akshare", specifier = ">=1.16.3" },
     { name = "coloredlogs", specifier = ">=15.0.1" },
     { name = "pandas", specifier = ">=2.2.3" },
+    { name = "plotly", specifier = ">=6.0.0" },
     { name = "pytz", specifier = ">=2025.1" },
     { name = "streamlit", specifier = ">=1.42.1" },
     { name = "streamlit-autorefresh", specifier = ">=1.0.1" },

@@ -10,6 +10,7 @@ from akcache import CacheWrapper
 from options import analyze_atm_options, find_primary_options
 from helpers import during_market_time, minutes_since_market_open, color_text
 from streamlit_autorefresh import st_autorefresh
+from index_spread import create_spread_chart
 
 ak = CacheWrapper(akshare, cache_time=180)
 st.set_page_config("成交量预测", "📈")
@@ -783,11 +784,30 @@ def streamlit_market_heat():
             )
 
 
+def streamlit_spread_chart():
+    st.title("指数40日收益差分析")
+
+    # 创建图表并获取当前收益差
+    fig, hs300_zz1000_spread, zz1000_dividend_spread = create_spread_chart()
+
+    # 显示图表
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 显示当前收益差
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write(f"沪深300-中证1000收益差: {hs300_zz1000_spread:.2f}%")
+    with col2:
+        st.write(f"中证1000-红利指数收益差: {zz1000_dividend_spread:.2f}%")
+
+
 def streamlit_app():
     # Run the autorefresh about every 2000 milliseconds (2 seconds)
     st_autorefresh(interval=60000, key="data_refresh")
 
     streamlit_market_heat()
+
+    streamlit_spread_chart()
 
     # 数据更新时间
     current_time = datetime.now()
