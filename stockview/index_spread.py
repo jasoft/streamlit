@@ -87,13 +87,26 @@ def create_spread_chart():
     fig.update_layout(
         title="指数走势与40日收益差对比",
         xaxis=dict(title="日期"),
-        yaxis=dict(title="中证1000指数", side="left", showgrid=True),
+        yaxis=dict(
+            title="中证1000指数",
+            side="left",
+            showgrid=True,
+            domain=[0.6, 0.95],  # 调整上半部分位置，使中证1000指数居中显示
+        ),
         yaxis2=dict(
-            title="40日收益差(%)", side="right", overlaying="y", showgrid=False
+            title="40日收益差(%)",
+            side="right",
+            showgrid=False,
+            domain=[0, 0.45],  # 下半部分显示收益差
         ),
         hovermode="x unified",
-        height=600,
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        height=800,  # 增加图表高度
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="right",  # 将图例移到右上角
+            x=0.99,
+        ),
     )
 
     return (
@@ -104,7 +117,7 @@ def create_spread_chart():
 
 
 def main():
-    st.title("指数40日收益差分析")
+    st.markdown("### 📈 指数40日收益差分析")
 
     # 创建图表并获取当前收益差
     fig, hs300_zz1000_spread, dividend_zz1000_spread = create_spread_chart()

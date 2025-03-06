@@ -8,12 +8,13 @@ import pytz
 import akshare
 from akcache import CacheWrapper
 from options import analyze_atm_options, find_primary_options
-from helpers import during_market_time, minutes_since_market_open, color_text
+from helpers import during_market_time, minutes_since_market_open
 from streamlit_autorefresh import st_autorefresh
 from index_spread import create_spread_chart
 
 ak = CacheWrapper(akshare, cache_time=180)
-st.set_page_config("成交量预测", "📈")
+# 设置页面
+st.set_page_config("成交量预测", "📈", layout="wide", initial_sidebar_state="expanded")
 
 
 @st.cache_data(ttl=60)
@@ -699,37 +700,30 @@ def get_market_heat():
             f"前{stocks_count}大成交额股票活跃度",
         ],
         "数值": [
-            f"{sh_amount/1e8:.0f} 亿",
-            f"{sz_amount/1e8:.0f} 亿",
-            f"{cyb_amount/1e8:.0f} 亿",
-            f"{total_amount/1e8:.0f} 亿",
-            f"{cyb_ratio:.2f}%",
-            f"{zz1000_ratio:.2f}%",
-            f"{zz2000_ratio:.2f}%",
-            f"{hs300_ratio:.2f}%",
+            int(sh_amount / 1e8),  # 上证成交额（亿）
+            int(sz_amount / 1e8),  # 深证成交额（亿）
+            int(cyb_amount / 1e8),  # 创业板成交额（亿）
+            int(total_amount / 1e8),  # 当前总成交额（亿）
+            round(cyb_ratio, 2),  # 创业板成交占比（%）
+            round(zz1000_ratio, 2),  # 中证1000成交占比（%）
+            round(zz2000_ratio, 2),  # 中证2000成交占比（%）
+            round(hs300_ratio, 2),  # 沪深300成交占比（%）
+            # 预计今日总成交额（亿）
             (
-                color_text(f"{total_pred/1e8:.0f} 亿", lambda: total_pred > 10000)
+                int(total_pred / 1e8)
                 if is_trade_date(datetime.now(pytz.timezone("Asia/Shanghai")).date())
-                else "N/A"
+                else None
             ),
-            f"{avg_5_day/1e8:.0f} 亿",
-            color_text(f"{crowdedness:.2f}", lambda: crowdedness < 50),
-            color_text(
-                f"{middle_price_change_value:.2f}%",
-                lambda: middle_price_change_value > 0,
-            ),
-            color_text(
-                f"{top5_weighted_avg_price_change:.2f}%",
-                lambda: top5_weighted_avg_price_change > 0,
-            ),
-            color_text(
-                f"{top5_avg_price_change :.2f}%", lambda: top5_avg_price_change > 0
-            ),
-            color_text(f"{up_down_ratio:.2f}%", lambda: up_down_ratio > 50),
-            limit_up_count,
-            limit_down_count,
-            f"{int(avg_market_value)}亿",
-            top_stocks,
+            int(avg_5_day / 1e8),  # 5日均值（亿）
+            round(crowdedness, 2),  # 交易拥挤度
+            round(middle_price_change_value, 2),  # 中位数股票涨幅（%）
+            round(top5_weighted_avg_price_change, 2),  # 前5%成交加权涨幅（%）
+            round(top5_avg_price_change, 2),  # 前5%成交算数涨幅（%）
+            round(up_down_ratio, 2),  # 股票上涨百分比（%）
+            limit_up_count,  # 涨停板股票数量
+            limit_down_count,  # 跌停板股票数量
+            int(avg_market_value),  # 前N大成交额股票平均市值（亿）
+            top_stocks,  # 前N大成交额股票活跃度
         ],
     }
 
@@ -751,41 +745,25 @@ def color_negative_red(val):
 def streamlit_market_heat():
     data = get_market_heat()
 
-    # 创建两列
-    col1, col2 = st.columns([2, 2])
+    # 成交额指标
+    st.header("成交额")
+    for item, value in zip(data["指标"][0:10], data["数值"][0:10]):
+        st.write(f"{item}: {value}")
 
-    with col1:
-        # 左栏显示成交额和情绪指标
-        st.header("成交额")
-        for item, value in zip(data["指标"][0:10], data["数值"][0:10]):
-            st.write(f"{item}: {value}")
+    # 情绪指标
+    st.header("情绪指标")
+    for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
+        st.write(f"{item}: {value}")
 
-        st.header("情绪指标")
-        for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
-            st.write(f"{item}: {value}")
-
-        if st.button("清除缓存"):
-            st.cache_data.clear()
-            ak.clear_cache()
-            st.success("缓存已清除")
-
-    with col2:
-        # 右栏显示龙头股分析
-        st.header("龙头股分析")
-        st.write(f"{data['指标'][17]}: {data['数值'][17]}")
-        if data["数值"][18] is not None:
-            styled_df = data["数值"][18].style.map(
-                color_negative_red, subset=["涨跌幅"]
-            )
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                hide_index=False,  # 显示股票名称作为索引
-            )
+    # 清除缓存按钮
+    if st.button("清除缓存"):
+        st.cache_data.clear()
+        ak.clear_cache()
+        st.success("缓存已清除")
 
 
 def streamlit_spread_chart():
-    st.title("指数40日收益差分析")
+    st.markdown("### 📈 指数40日收益差分析")
 
     # 创建图表并获取当前收益差
     fig, hs300_zz1000_spread, zz1000_dividend_spread = create_spread_chart()
@@ -802,20 +780,236 @@ def streamlit_spread_chart():
 
 
 def streamlit_app():
-    # Run the autorefresh about every 2000 milliseconds (2 seconds)
+    # 自动刷新
     st_autorefresh(interval=60000, key="data_refresh")
 
-    streamlit_market_heat()
+    # 创建三个标签页
+    tab1, tab2, tab3 = st.tabs(["💹 成交量与情绪", "🏢 龙头股分析", "📊 指数对比"])
 
-    streamlit_spread_chart()
+    with tab1:
+        # 第一个tab显示成交额和情绪指标
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown("### 🎯 市场成交与情绪分析")
 
-    # 数据更新时间
+        data = get_market_heat()
+
+        # 使用多列布局显示主要指标
+        metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
+
+        with metrics_col1:
+            avg_amount = data["数值"][9]  # 5日均值（亿）
+            pred_amount = data["数值"][8]  # 预估成交额（亿）
+
+            # 预估成交额指标
+            if pred_amount is not None:
+                delta_vs_avg = pred_amount - avg_amount
+                delta_color = "inverse" if delta_vs_avg > 0 else "normal"
+                st.metric(
+                    "预估成交额",
+                    f"{pred_amount:,}亿",
+                    delta=f"{delta_vs_avg:+,}亿 vs 5日均值",
+                    delta_color=delta_color,
+                )
+
+        with metrics_col2:
+            up_ratio = data["数值"][14]  # 上涨占比（%）
+            st.metric(
+                "上涨占比",
+                f"{up_ratio:.1f}%",
+                delta=f"{up_ratio - 50:.1f}%",
+                delta_color="inverse" if up_ratio > 50 else "normal",
+            )
+
+        with metrics_col3:
+            limit_up = data["数值"][15]  # 涨停数量
+            limit_down = data["数值"][16]  # 跌停数量
+            st.metric(
+                "涨停数量",
+                str(limit_up),
+                delta=f"-跌停 {limit_down}",
+                delta_color="inverse",
+            )
+
+        with metrics_col4:
+            middle_change = data["数值"][11]  # 中位数涨幅（%）
+            st.metric(
+                "中位数涨幅",
+                f"{middle_change:.2f}%",
+                delta=None,
+                delta_color="inverse" if middle_change > 0 else "normal",
+            )
+
+        # 分两列显示详细数据
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown(
+                """
+            <style>
+            .index-progress {
+                margin-bottom: 0.5rem;
+            }
+            .index-progress .label {
+                margin-bottom: 0.2rem;
+                font-size: 0.9rem;
+                color: #333;
+            }
+            .index-progress .value {
+                font-size: 0.8rem;
+                color: #666;
+                margin-top: 0.1rem;
+            }
+            </style>
+            """,
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("#### 💰 指数成交占比")
+
+            # 总成交额（亿）
+            total = data["数值"][3]
+
+            # 定义指数数据
+            indices = [
+                ("上证指数", data["数值"][0]),
+                ("深证指数", data["数值"][1]),
+                ("创业板", data["数值"][2]),
+                ("中证1000", data["数值"][5] * total / 100),  # 转换百分比为实际值
+                ("沪深300", data["数值"][7] * total / 100),  # 转换百分比为实际值
+            ]
+
+            # 显示各指数进度条
+            for name, amount in indices:
+                st.markdown('<div class="index-progress">', unsafe_allow_html=True)
+                cols = st.columns([2, 8])
+                with cols[0]:
+                    st.markdown(
+                        f'<div class="label">{name}</div>', unsafe_allow_html=True
+                    )
+                with cols[1]:
+                    st.progress(amount / total)
+                    value = f"{(amount/total*100):.1f}%"
+                    st.markdown(
+                        f'<div class="value">{value}</div>', unsafe_allow_html=True
+                    )
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # 显示总成交额和5日均值
+            cols = st.columns(2)
+            with cols[0]:
+                st.info(f"**总成交额**: {data['数值'][3]} 亿")
+            with cols[1]:
+                st.info(f"**5日均值**: {data['数值'][9]} 亿")
+
+        with col2:
+            st.markdown("#### 💡 情绪指标")
+            for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
+                # 处理带颜色标记的值
+                val_str = str(value)
+                if any(color in val_str for color in [":red[", ":green["]):
+                    val = float(val_str.split("[")[1].rstrip("]").rstrip("%"))
+                else:
+                    val = float(val_str.rstrip("%"))
+
+                if val > 0:
+                    st.success(f"**{item}**: {value}")
+                else:
+                    st.error(f"**{item}**: {value}")
+
+    with tab2:
+        # 第二个tab显示龙头股分析
+        st.markdown("### 🔥 龙头股活跃度分析")
+        data = get_market_heat()
+
+        # 显示平均市值
+        st.info(f"#### 📊 {data['指标'][17]}\n{data['数值'][17]}")
+
+        if data["数值"][18] is not None:
+            # 增加过滤和排序选项
+            col1, col2 = st.columns([2, 2])
+            with col1:
+                sort_by = st.selectbox(
+                    "排序依据", ["成交额", "涨跌幅", "换手率", "总市值"], index=0
+                )
+
+            # 获取原始DataFrame
+            df = data["数值"][18]
+
+            # 根据选择的列进行排序
+            if sort_by == "涨跌幅":
+                df = df.sort_values(
+                    by="涨跌幅",
+                    ascending=False,
+                    key=lambda x: x.str.rstrip("%").astype(float),
+                )
+            elif sort_by in ["成交额", "总市值"]:
+                df = df.sort_values(
+                    by=sort_by,
+                    ascending=False,
+                    key=lambda x: x.str.rstrip("亿").astype(float),
+                )
+            elif sort_by == "换手率":
+                df = df.sort_values(
+                    by="换手率",
+                    ascending=False,
+                    key=lambda x: x.str.rstrip("%").astype(float),
+                )
+
+            # 美化数据表格显示
+            styled_df = (
+                df.style.map(color_negative_red, subset=["涨跌幅"])
+                .set_properties(
+                    **{
+                        "background-color": "#f0f2f6",
+                        "color": "#1f2937",
+                        "font-size": "14px",
+                    }
+                )
+                .set_table_styles(
+                    [
+                        {
+                            "selector": "th",
+                            "props": [
+                                ("background-color", "#dfe3e8"),
+                                ("color", "#374151"),
+                            ],
+                        }
+                    ]
+                )
+            )
+
+            st.dataframe(
+                styled_df, use_container_width=True, height=400, hide_index=False
+            )
+
+    with tab3:
+        # 第三个tab显示指数收益差分析
+        streamlit_spread_chart()
+
+    # 数据更新时间和状态显示
     current_time = datetime.now()
     updated_at = current_time.astimezone(pytz.timezone("Asia/Shanghai")).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
-    status = "（非交易时间）" if not during_market_time(current_time) else ""
-    st.write("数据更新时间:", updated_at, status)
+    status = "（非交易时间）" if not during_market_time(current_time) else "（交易中）"
+
+    # 使用 st.markdown 添加带样式的更新时间信息
+    st.markdown(
+        f"""
+        <div style='
+            padding: 10px;
+            background-color: #f0f2f6;
+            border-radius: 5px;
+            font-size: 14px;
+            color: #666;
+            text-align: center;
+        '>
+            ⏰ 数据更新时间: {updated_at} {status}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":
