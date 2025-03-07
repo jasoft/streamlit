@@ -216,7 +216,7 @@ def get_index_price(symbol):
         return index_value
     except Exception as e:
         logger.error(f"获取指数 {symbol} 当前价格时发生错误：{str(e)}")
-        return None
+        return 0
 
 
 def get_index_amount(symbol):
@@ -230,7 +230,7 @@ def get_index_amount(symbol):
         return index_value
     except Exception as e:
         logger.error(f"获取指数 {symbol} 当前成交额时发生错误：{str(e)}")
-        return None
+        return 0
 
 
 # 获取当前成交额
