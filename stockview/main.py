@@ -196,8 +196,8 @@ def get_n_day_avg_amount(n):
         stock_zh_a_daily_df_sz = ak.stock_zh_index_daily_em(symbol="sz399001")
         logger.info("成功获取上证和深证每日数据")
 
-        sh_amount = stock_zh_a_daily_df_sh["amount"].iloc[-6:-1].mean()
-        sz_amount = stock_zh_a_daily_df_sz["amount"].iloc[-6:-1].mean()
+        sh_amount = int(stock_zh_a_daily_df_sh["amount"].iloc[-6:-1].mean())
+        sz_amount = int(stock_zh_a_daily_df_sz["amount"].iloc[-6:-1].mean())
 
         logger.info(
             f"最近 {n} 个交易日上证平均成交额: {sh_amount}, 深证平均成交额: {sz_amount}"
@@ -212,7 +212,7 @@ def get_n_day_avg_amount(n):
 def get_index_price(symbol):
     try:
         index_data = ak.stock_zh_index_spot_em(symbol="深证系列指数")
-        index_value = index_data[index_data["代码"] == symbol]["最新价"].values[0]
+        index_value = int(index_data[index_data["代码"] == symbol]["最新价"].values[0])
         return index_value
     except Exception as e:
         logger.error(f"获取指数 {symbol} 当前价格时发生错误：{str(e)}")
@@ -226,7 +226,7 @@ def get_index_amount(symbol):
         df_csi = ak.stock_zh_index_spot_em(symbol="中证系列指数")
         df = pd.concat([df_sh, df_sz, df_csi], axis=0)
 
-        index_value = df[df["代码"] == symbol]["成交额"].values[0]
+        index_value = int(df[df["代码"] == symbol]["成交额"].values[0])
         return index_value
     except Exception as e:
         logger.error(f"获取指数 {symbol} 当前成交额时发生错误：{str(e)}")
@@ -627,7 +627,7 @@ def get_market_heat():
     sz_pred = predict_amount(sz_amount, current_time)
 
     # 计算总成交额和预测总成交额
-    total_amount = sh_amount + sz_amount
+    total_amount = sh_amount + sz_amount or 1  # Use 1 if total_amount is 0
     total_pred = sh_pred + sz_pred
 
     # 创业板成交占比（散户跟风指标）
