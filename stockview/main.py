@@ -780,11 +780,17 @@ def streamlit_spread_chart():
 
 
 def streamlit_app():
-    # 自动刷新
-    st_autorefresh(interval=60000, key="data_refresh")
-
-    # 创建三个标签页
-    tab1, tab2, tab3 = st.tabs(["💹 成交量与情绪", "🏢 龙头股分析", "📊 指数对比"])
+    current_time = datetime.now()
+    is_trading = during_market_time(current_time)
+    
+    # 只在交易时间启用自动刷新
+    if is_trading:
+        st_autorefresh(interval=60000, key="data_refresh")
+    
+    # 创建主容器
+    with st.empty():
+        # 创建三个标签页
+        tab1, tab2, tab3 = st.tabs(["💹 成交量与情绪", "🏢 龙头股分析", "📊 指数对比"])
 
     with tab1:
         # 第一个tab显示成交额和情绪指标
@@ -818,7 +824,7 @@ def streamlit_app():
                 "上涨占比",
                 f"{up_ratio:.1f}%",
                 delta=f"{up_ratio - 50:.1f}%",
-                delta_color="inverse" if up_ratio > 50 else "normal",
+                delta_color="normal" if up_ratio > 50 else "inverse",
             )
 
         with metrics_col3:
@@ -844,21 +850,59 @@ def streamlit_app():
         col1, col2 = st.columns(2)
 
         with col1:
+
+            def get_progress_html(value_pct):
+                """根据百分比返回进度条HTML"""
+
+                def get_color(pct):
+                    if pct <= 20:
+                        return "#90d4a2"  # 绿色
+                    elif pct <= 40:
+                        return "#27ae60"  # 深绿色
+                    elif pct <= 60:
+                        return "#f1c40f"  # 黄色
+                    elif pct <= 80:
+                        return "#e67e22"  # 橙色
+                    else:
+                        return "#e74c3c"  # 红色
+
+                color = get_color(value_pct)
+                logger.info(f"进度条颜色: {color}")
+                width = value_pct  # percentage已经是百分比值，不需要再乘100
+                return f"""
+                    <div style="
+                        width: 100%;
+                        background-color: #eee;
+                        border-radius: 3px;
+                        padding: 3px;
+                        box-sizing: border-box;
+                    ">
+                        <div style="
+                            width: {width}%;
+                            height: 20px;
+                            background-color: {color};
+                            border-radius: 2px;
+                            transition: width 0.3s ease;
+                        "></div>
+                    </div>
+                """
+
             st.markdown(
                 """
             <style>
             .index-progress {
-                margin-bottom: 0.5rem;
+                margin-bottom: 1rem;
             }
             .index-progress .label {
-                margin-bottom: 0.2rem;
-                font-size: 0.9rem;
+                margin-bottom: 0.5rem;
+                font-weight: 500;
                 color: #333;
             }
             .index-progress .value {
-                font-size: 0.8rem;
+                font-size: 0.9rem;
                 color: #666;
-                margin-top: 0.1rem;
+                margin-top: 0.3rem;
+                text-align: right;
             }
             </style>
             """,
@@ -876,6 +920,7 @@ def streamlit_app():
                 ("深证指数", data["数值"][1]),
                 ("创业板", data["数值"][2]),
                 ("中证1000", data["数值"][5] * total / 100),  # 转换百分比为实际值
+                ("中证2000", data["数值"][6] * total / 100),  # 转换百分比为实际值
                 ("沪深300", data["数值"][7] * total / 100),  # 转换百分比为实际值
             ]
 
@@ -888,10 +933,13 @@ def streamlit_app():
                         f'<div class="label">{name}</div>', unsafe_allow_html=True
                     )
                 with cols[1]:
-                    st.progress(amount / total)
-                    value = f"{(amount/total*100):.1f}%"
+                    percentage = (amount / total) * 100  # 转换为百分比
+                    logger.info(f"{name}占比: {percentage:.1f}%")
+                    progress_html = get_progress_html(percentage)
+                    st.markdown(progress_html, unsafe_allow_html=True)
                     st.markdown(
-                        f'<div class="value">{value}</div>', unsafe_allow_html=True
+                        f'<div class="value">{percentage:.1f}%</div>',
+                        unsafe_allow_html=True,
                     )
                 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -906,16 +954,14 @@ def streamlit_app():
             st.markdown("#### 💡 情绪指标")
             for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
                 # 处理带颜色标记的值
-                val_str = str(value)
-                if any(color in val_str for color in [":red[", ":green["]):
-                    val = float(val_str.split("[")[1].rstrip("]").rstrip("%"))
+                output = f"**{item}**: {value}"
+                # More Pythonic way to check for specific substrings
+                if any(keyword in item for keyword in ["百分比", "涨幅"]):
+                    output = output + "%"
+                if value > 0:
+                    st.success(output)
                 else:
-                    val = float(val_str.rstrip("%"))
-
-                if val > 0:
-                    st.success(f"**{item}**: {value}")
-                else:
-                    st.error(f"**{item}**: {value}")
+                    st.error(output)
 
     with tab2:
         # 第二个tab显示龙头股分析
@@ -992,9 +1038,11 @@ def streamlit_app():
     updated_at = current_time.astimezone(pytz.timezone("Asia/Shanghai")).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
-    status = "（非交易时间）" if not during_market_time(current_time) else "（交易中）"
+    is_trading = during_market_time(current_time)
+    status = "（非交易时间 - 已暂停刷新）" if not is_trading else f"（交易中 - {60}秒自动刷新）"
 
-    # 使用 st.markdown 添加带样式的更新时间信息
+    # 使用 st.markdown 添加带样式的更新时间信息和刷新状态
+    status_color = "#1f77b4" if is_trading else "#666"
     st.markdown(
         f"""
         <div style='
@@ -1002,10 +1050,17 @@ def streamlit_app():
             background-color: #f0f2f6;
             border-radius: 5px;
             font-size: 14px;
-            color: #666;
+            color: {status_color};
             text-align: center;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         '>
-            ⏰ 数据更新时间: {updated_at} {status}
+            <span>⏰ 数据更新时间: {updated_at}</span>
+            <span style='
+                color: {status_color};
+                font-weight: 500;
+            '>{status}</span>
         </div>
         """,
         unsafe_allow_html=True,
