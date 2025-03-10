@@ -5,11 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "akshare>=1.16.3",
+    "akshare>=1.16.35",
     "coloredlogs>=15.0.1",
     "pandas>=2.2.3",
     "plotly>=6.0.0",
     "pytz>=2025.1",
-    "streamlit>=1.42.1",
+    "streamlit>=1.43.1",
     "streamlit-autorefresh>=1.0.1",
 ]

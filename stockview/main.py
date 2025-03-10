@@ -11,6 +11,8 @@ from options import analyze_atm_options, find_primary_options
 from helpers import during_market_time, minutes_since_market_open
 from streamlit_autorefresh import st_autorefresh
 from index_spread import create_spread_chart
+import sys
+import os
 
 ak = CacheWrapper(akshare, cache_time=180)
 # 设置页面
@@ -86,9 +88,7 @@ def get_amount_curve(ndays):
         df2.columns = ["day", "amount_sh", "amount_sz"]
         df2["amount_sh"] = pd.to_numeric(df2["amount_sh"])
         df2["amount_sz"] = pd.to_numeric(df2["amount_sz"])
-        df2["date"] = pd.to_datetime(
-            df2["day"], infer_datetime_format=True
-        )  # format='%Y-%m-%d %H:%M:%S'
+        df2["date"] = pd.to_datetime(df2["day"])  # format='%Y-%m-%d %H:%M:%S'
         df2["totalamount"] = df2.apply(
             lambda x: (x["amount_sh"] + x["amount_sz"]), axis=1
         )
@@ -101,11 +101,8 @@ def get_amount_curve(ndays):
 
         df_all = pd.DataFrame()
         for i in range(ndays):
-            df_range = df2.iloc[i * 16 : (i + 1) * 16]
+            df_range = df2.iloc[i * 16 : (i + 1) * 16].copy()  # 创建副本
             day_amount = df_range.totalamount.sum()
-            df_range["pct"] = df_range.apply(
-                lambda x: (x["totalamount"] / day_amount), axis=1
-            )
             df_range.loc[:, "pct"] = df_range.apply(
                 lambda x: (x["totalamount"] / day_amount), axis=1
             )
@@ -211,11 +208,15 @@ def get_n_day_avg_amount(n):
 @st.cache_data(ttl=180)
 def get_index_price(symbol):
     try:
-        index_data = ak.stock_zh_index_spot_em(symbol="深证系列指数")
+        index_data = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
         index_value = int(index_data[index_data["代码"] == symbol]["最新价"].values[0])
         return index_value
     except Exception as e:
-        logger.error(f"获取指数 {symbol} 当前价格时发生错误：{str(e)}")
+        exc_type, exc_obj, tb = sys.exc_info()
+        fname = os.path.split(tb.tb_frame.f_code.co_filename)[1]
+        logger.error(
+            f"获取指数 {symbol} 当前价格时发生错误：文件 {fname} 行号 {tb.tb_lineno} 错误信息: {str(e)}"
+        )
         return 0
 
 
@@ -224,13 +225,14 @@ def get_index_amount(symbol):
         df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
         df_sz = ak.stock_zh_index_spot_em(symbol="深证系列指数")
         df_csi = ak.stock_zh_index_spot_em(symbol="中证系列指数")
-        df = pd.concat([df_sh, df_sz, df_csi], axis=0)
+        df_vip = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
+        df = pd.concat([df_sh, df_sz, df_csi, df_vip], axis=0)
 
         index_value = int(df[df["代码"] == symbol]["成交额"].values[0])
         return index_value
     except Exception as e:
         logger.error(f"获取指数 {symbol} 当前成交额时发生错误：{str(e)}")
-        return 0
+        raise
 
 
 # 获取当前成交额
@@ -251,18 +253,21 @@ def get_a_amount() -> tuple[float, float]:
 
     try:
         logger.info("开始获取指数数据")
-        spot_df_sh = ak.stock_zh_index_spot_em(symbol="上证系列指数")
-        spot_df_sz = ak.stock_zh_index_spot_em(symbol="深证系列指数")
+        spot_df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
     except Exception as e:
         logger.error(f"获取指数数据时发生错误：{str(e)}")
         return 0, 0
 
-    sh_amount = spot_df_sh[spot_df_sh["代码"] == "000001"]["成交额"].values[
-        0
-    ]  # 上证成交额
-    sz_amount = spot_df_sz[spot_df_sz["代码"] == "399001"]["成交额"].values[
-        0
-    ]  # 深证成交额
+    # 检查是否存在对应的指数代码
+    sh_mask = spot_df["代码"] == "000001"
+    sz_mask = spot_df["代码"] == "399001"
+
+    if not sh_mask.any() or not sz_mask.any():
+        logger.error("未找到上证或深证指数数据")
+        return 0, 0
+
+    sh_amount = spot_df[sh_mask]["成交额"].iloc[0]  # 使用iloc[0]代替values[0]
+    sz_amount = spot_df[sz_mask]["成交额"].iloc[0]  # 深证成交额
     logger.info(f"获取上证和深证指数的成交量: 上证 {sh_amount}, 深证 {sz_amount}")
     if pd.isna(sh_amount) or pd.isna(sz_amount):
         logger.error("获取的成交量数据包含 NaN 值")
@@ -641,7 +646,7 @@ def get_market_heat():
     hs300_ratio = hs300_amount / total_amount * 100
 
     # 中证 1000 成交占比
-    zz1000_amount = get_index_amount("399852")
+    zz1000_amount = get_index_amount("000852")
     zz1000_ratio = zz1000_amount / total_amount * 100
 
     # 中证 2000 成交占比
@@ -782,11 +787,11 @@ def streamlit_spread_chart():
 def streamlit_app():
     current_time = datetime.now()
     is_trading = during_market_time(current_time)
-    
+
     # 只在交易时间启用自动刷新
     if is_trading:
         st_autorefresh(interval=60000, key="data_refresh")
-    
+
     # 创建主容器
     with st.empty():
         # 创建三个标签页
@@ -867,7 +872,6 @@ def streamlit_app():
                         return "#e74c3c"  # 红色
 
                 color = get_color(value_pct)
-                logger.info(f"进度条颜色: {color}")
                 width = value_pct  # percentage已经是百分比值，不需要再乘100
                 return f"""
                     <div style="
@@ -934,7 +938,6 @@ def streamlit_app():
                     )
                 with cols[1]:
                     percentage = (amount / total) * 100  # 转换为百分比
-                    logger.info(f"{name}占比: {percentage:.1f}%")
                     progress_html = get_progress_html(percentage)
                     st.markdown(progress_html, unsafe_allow_html=True)
                     st.markdown(
@@ -1039,7 +1042,11 @@ def streamlit_app():
         "%Y-%m-%d %H:%M:%S"
     )
     is_trading = during_market_time(current_time)
-    status = "（非交易时间 - 已暂停刷新）" if not is_trading else f"（交易中 - {60}秒自动刷新）"
+    status = (
+        "（非交易时间 - 已暂停刷新）"
+        if not is_trading
+        else f"（交易中 - {60}秒自动刷新）"
+    )
 
     # 使用 st.markdown 添加带样式的更新时间信息和刷新状态
     status_color = "#1f77b4" if is_trading else "#666"
