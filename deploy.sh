@@ -3,7 +3,7 @@
 echo "Deploying streamlit app..."
 
 # 切换到工作目录
-cd /root/streamlit_apps
+cd /root/streamlit
 
 # 保存当前 commit hash
 BEFORE_PULL=$(git rev-parse HEAD)
