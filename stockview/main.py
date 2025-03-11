@@ -806,7 +806,7 @@ def streamlit_app():
         try:
             data = get_market_heat()
         except Exception:
-            st.error("开盘准备期间，无法获取数据，请稍后刷新。")
+            st.error("开盘期间，无法获取数据，请稍后刷新。")
             return
 
         # 使用多列布局显示主要指标
