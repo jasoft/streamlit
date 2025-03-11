@@ -803,7 +803,11 @@ def streamlit_app():
         with col1:
             st.markdown("### 🎯 市场成交与情绪分析")
 
-        data = get_market_heat()
+        try:
+            data = get_market_heat()
+        except Exception:
+            st.error("开盘准备期间，无法获取数据，请稍后刷新。")
+            return
 
         # 使用多列布局显示主要指标
         metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
