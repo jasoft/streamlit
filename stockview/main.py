@@ -917,7 +917,7 @@ def streamlit_app():
                 unsafe_allow_html=True,
             )
 
-            st.markdown("#### 💰 指数成交占比")
+            st.markdown("#### 💰 指数成交占比1")
 
             # 总成交额（亿）
             total = data["数值"][3]
