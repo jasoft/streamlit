@@ -324,6 +324,8 @@ def count_limit_up_stocks():
         lambda row: (
             row["涨跌幅"] >= 19.9
             if row["代码"].startswith(("30", "68"))
+            else row["涨跌幅"] >= 29
+            if row["代码"].startswith("8")
             else row["涨跌幅"] >= 9.9
         ),
         axis=1,
@@ -354,6 +356,8 @@ def count_limit_down_stocks():
         lambda row: (
             row["涨跌幅"] <= -19.9
             if row["代码"].startswith(("30", "68"))
+            else row["涨跌幅"] <= -29
+            if row["代码"].startswith("8")
             else row["涨跌幅"] <= -9.9
         ),
         axis=1,
@@ -819,7 +823,7 @@ def streamlit_app():
             # 预估成交额指标
             if pred_amount is not None:
                 delta_vs_avg = pred_amount - avg_amount
-                delta_color = "inverse" if delta_vs_avg > 0 else "normal"
+                delta_color = "normal" if delta_vs_avg > 0 else "inverse"
                 st.metric(
                     "预估成交额",
                     f"{pred_amount:,}亿",
@@ -829,12 +833,7 @@ def streamlit_app():
 
         with metrics_col2:
             up_ratio = data["数值"][14]  # 上涨占比（%）
-            st.metric(
-                "上涨占比",
-                f"{up_ratio:.1f}%",
-                delta=f"{up_ratio - 50:.1f}%",
-                delta_color="normal" if up_ratio > 50 else "inverse",
-            )
+            st.metric("上涨占比", f"{up_ratio:.1f}%")
 
         with metrics_col3:
             limit_up = data["数值"][15]  # 涨停数量
