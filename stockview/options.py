@@ -1,7 +1,7 @@
 import re
 import pandas as pd
 import akshare
-from akcache import CacheWrapper
+from stockview.akcache import CacheWrapper
 from datetime import datetime
 
 ak = CacheWrapper(akshare, cache_time=180)

@@ -1,5 +1,8 @@
 /.venv
 /.vscode
+/node_modules
 /stockview.log
+/outputs
+/tmp_*.csv
 __pycache__
 stockview/stockview.log

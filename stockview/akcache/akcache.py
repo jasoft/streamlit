@@ -1,5 +1,5 @@
 import time
-from log import logger
+from stockview.log import logger
 
 
 class CacheWrapper:

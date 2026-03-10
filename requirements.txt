@@ -1,4 +1,4 @@
-akshare==1.14.84
+akshare==1.18.37
 altair==5.4.1
 appnope==0.1.4
 asttokens==2.4.1

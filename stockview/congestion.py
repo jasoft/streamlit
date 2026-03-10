@@ -7,6 +7,7 @@ import requests
 
 
 # 数据获取函数
+@st.cache_data(ttl=3600)
 def get_html_content(url):
     headers = {
         "User-Agent": (
@@ -16,7 +17,7 @@ def get_html_content(url):
         )
     }
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         return response.text
     except requests.RequestException as e:
@@ -57,10 +58,8 @@ def process_html_data(html_content):
 
 
 # Streamlit 应用
-def streamlit():
+def render_congestion_page() -> None:
     st.title("A股市场拥挤度和上证指数走势图")
-    # 设置页面布局为宽屏模式
-    # 用户输入 URL
     url = st.text_input(
         "输入数据源 URL", "https://legulegu.com/stockdata/ashares-congestion"
     )
@@ -128,5 +127,8 @@ def streamlit():
                 st.error("无法处理获取到的数据。请检查 URL 是否正确。")
 
 
+streamlit = render_congestion_page
+
+
 if __name__ == "__main__":
-    streamlit()
+    render_congestion_page()

@@ -1,22 +1,20 @@
 import streamlit as st
 from datetime import date, datetime
 import pandas as pd
-from log import logger
+from stockview.log import logger
 import pytz
 
 # from streamlit_autorefresh import st_autorefresh
 import akshare
-from akcache import CacheWrapper
-from options import analyze_atm_options, find_primary_options
-from helpers import during_market_time, minutes_since_market_open
+from stockview.akcache import CacheWrapper
+from stockview.options import analyze_atm_options, find_primary_options
+from stockview.helpers import during_market_time, minutes_since_market_open
 from streamlit_autorefresh import st_autorefresh
-from index_spread import create_spread_chart
+from stockview.index_spread import create_spread_chart
 import sys
 import os
 
 ak = CacheWrapper(akshare, cache_time=180)
-# 设置页面
-st.set_page_config("成交量预测", "📈", layout="wide", initial_sidebar_state="expanded")
 
 
 @st.cache_data(ttl=60)
@@ -738,10 +736,6 @@ def get_market_heat():
 
     return data
 
-
-placeholder = st.empty()  # 创建一个空白区域
-
-
 def color_negative_red(val):
     try:
         val = float(val.rstrip("%"))
@@ -1078,4 +1072,7 @@ def streamlit_app():
 
 
 if __name__ == "__main__":
+    st.set_page_config(
+        "成交量预测", "📈", layout="wide", initial_sidebar_state="expanded"
+    )
     streamlit_app()
