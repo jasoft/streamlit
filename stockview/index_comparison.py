@@ -23,8 +23,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-CACHE_DIR = Path(__file__).parent / "stockview" / "akcache"
+# 路径配置
+BASE_DIR = Path(__file__).parent.parent
+CACHE_DIR = BASE_DIR / "stockview" / "akcache"
 CACHE_FILE = CACHE_DIR / "iwencai_index_cache.json"
+SCRIPTS_DIR = BASE_DIR / "skills" / "financial-data" / "scripts"
 
 def fetch_index_data(index_name: str) -> Dict:
     """调用 cli_index.py 获取指数数据，带持久化缓存"""
@@ -49,7 +52,7 @@ def fetch_index_data(index_name: str) -> Dict:
 
     # 调用脚本获取新数据
     logger.info(f"缓存未命中或已过期，正在调用 cli_index.py 获取 {index_name} 数据...")
-    script_path = Path(__file__).parent / "scripts" / "cli_index.py"
+    script_path = SCRIPTS_DIR / "cli_index.py"
     query = f"{index_name}2015年至今月度涨跌幅"
 
     result = subprocess.run(
@@ -325,13 +328,7 @@ def create_trend_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def main():
-    st.set_page_config(
-        page_title="沪深300 vs 中证1000 月度分析",
-        page_icon="📊",
-        layout="wide",
-    )
-
+def render_index_comparison_page():
     st.title("沪深300 vs 中证1000 月度相对表现分析")
     st.markdown("统计最近5年每个月的相对涨幅，分析哪些月份哪个指数更强")
 
@@ -447,4 +444,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    st.set_page_config(
+        page_title="沪深300 vs 中证1000 月度分析",
+        page_icon="📊",
+        layout="wide",
+    )
+    render_index_comparison_page()

@@ -6,11 +6,22 @@ import pytz
 
 # from streamlit_autorefresh import st_autorefresh
 import akshare
+import tushare as ts
+from dotenv import load_dotenv
 from stockview.akcache import CacheWrapper
-from stockview.options import analyze_atm_options, find_primary_options
+load_dotenv()
+
+ts_api = None
+tushare_token = os.getenv("TUSHARE_TOKEN")
+if tushare_token:
+    ts.set_token(tushare_token)
+    ts_api = ts.pro_api()
+
+ak = CacheWrapper(akshare, cache_time=180)
 from stockview.helpers import during_market_time, minutes_since_market_open
 from streamlit_autorefresh import st_autorefresh
 from stockview.index_spread import create_spread_chart
+from stockview.index_comparison import render_index_comparison_page
 import sys
 import os
 
@@ -210,6 +221,17 @@ def get_index_price(symbol):
         index_value = int(index_data[index_data["代码"] == symbol]["最新价"].values[0])
         return index_value
     except Exception as e:
+        logger.warning(f"AKShare 获取指数 {symbol} 失败，尝试 Tushare: {str(e)}")
+        if ts_api:
+            try:
+                # Tushare 代码转换，例如 000001 -> 000001.SH
+                ts_symbol = symbol + (".SH" if symbol.startswith(("000", "60")) else ".SZ")
+                df = ts_api.index_daily(ts_code=ts_symbol, limit=1)
+                if not df.empty:
+                    return int(df.iloc[0]["close"])
+            except Exception as ts_e:
+                logger.error(f"Tushare 获取指数 {symbol} 也失败了: {str(ts_e)}")
+        
         exc_type, exc_obj, tb = sys.exc_info()
         fname = os.path.split(tb.tb_frame.f_code.co_filename)[1]
         logger.error(
@@ -792,8 +814,8 @@ def streamlit_app():
 
     # 创建主容器
     with st.empty():
-        # 创建三个标签页
-        tab1, tab2, tab3 = st.tabs(["💹 成交量与情绪", "🏢 龙头股分析", "📊 指数对比"])
+        # 创建四个标签页
+        tab1, tab2, tab3, tab4 = st.tabs(["💹 成交量与情绪", "🏢 龙头股分析", "📈 收益差分析", "📊 指数月度对比"])
 
     with tab1:
         # 第一个tab显示成交额和情绪指标
