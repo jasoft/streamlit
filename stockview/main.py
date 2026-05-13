@@ -16,6 +16,7 @@ from stockview.helpers import during_market_time, minutes_since_market_open
 from streamlit_autorefresh import st_autorefresh
 from stockview.index_spread import create_spread_chart
 from stockview.index_comparison import render_index_comparison_page
+from stockview.if_im_strategy import render_if_im_strategy_page
 from stockview.akcache.rate_limiter import rate_limiter
 
 # ============ 数据源配置 ============
@@ -583,7 +584,7 @@ def streamlit_app():
     if is_trading:
         st_autorefresh(interval=60000, key="data_refresh")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["💹 成交量与情绪", "🏢 龙头股分析", "📈 收益差分析", "📊 指数月度对比"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["💹 成交量与情绪", "🏢 龙头股分析", "📈 收益差分析", "📊 指数月度对比", "🎯 IF/IM策略"])
 
     with tab1:
         st.markdown("### 🎯 市场成交与情绪分析")
@@ -706,6 +707,9 @@ def streamlit_app():
 
     with tab4:
         render_index_comparison_page()
+
+    with tab5:
+        render_if_im_strategy_page()
 
     # 状态栏
     current_time = datetime.now()
