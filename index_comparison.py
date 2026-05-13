@@ -19,7 +19,8 @@ from plotly.subplots import make_subplots
 def fetch_index_data(index_name: str) -> Dict:
     """调用 cli_index.py 获取指数月度涨跌幅数据"""
     script_path = Path(__file__).parent / "scripts" / "cli_index.py"
-    query = f"{index_name}近5年月度涨跌幅"
+    # 使用更长的时间范围确保数据完整性
+    query = f"{index_name}2015年至今月度涨跌幅"
 
     result = subprocess.run(
         [sys.executable, str(script_path), "--query", query, "--limit", "1"],
@@ -31,12 +32,16 @@ def fetch_index_data(index_name: str) -> Dict:
         st.error(f"获取 {index_name} 数据失败: {result.stderr}")
         return {}
 
-    return json.loads(result.stdout)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        st.error(f"解析 {index_name} 数据 JSON 失败")
+        return {}
 
 
 def parse_monthly_data(data: Dict) -> pd.DataFrame:
     """解析月度涨跌幅数据"""
-    if not data.get("success") or not data.get("datas"):
+    if not data or not data.get("success") or not data.get("datas"):
         return pd.DataFrame()
 
     record = data["datas"][0]
@@ -45,15 +50,23 @@ def parse_monthly_data(data: Dict) -> pd.DataFrame:
     for key, value in record.items():
         if key.startswith("月涨跌幅[") and key.endswith("]"):
             date_str = key[5:-1]  # 提取 YYYYMMDD
-            date = pd.to_datetime(date_str, format="%Y%m%d")
-            monthly_data.append(
-                {
-                    "date": date,
-                    "year": date.year,
-                    "month": date.month,
-                    "change_pct": value,
-                }
-            )
+            try:
+                date = pd.to_datetime(date_str, format="%Y%m%d")
+                # 只有当 value 为数字时才添加
+                if isinstance(value, (int, float)):
+                    monthly_data.append(
+                        {
+                            "date": date,
+                            "year": date.year,
+                            "month": date.month,
+                            "change_pct": float(value),
+                        }
+                    )
+            except Exception:
+                continue
+
+    if not monthly_data:
+        return pd.DataFrame()
 
     df = pd.DataFrame(monthly_data)
     df = df.sort_values("date").reset_index(drop=True)
@@ -256,7 +269,7 @@ def create_trend_chart(df: pd.DataFrame) -> go.Figure:
         )
     )
 
-    fig.add_hline(y=0, line_dash="dash", line_color="gray", yaxis="y2")
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", yref="y2")
 
     fig.update_layout(
         title="近5年月度涨跌幅趋势",
@@ -296,6 +309,11 @@ def main():
 
     # 计算相对表现
     df_merged = calculate_relative_performance(df_hs300, df_csi1000)
+    
+    # 过滤最近5年的数据进行展示（2021年至今）
+    current_year = pd.Timestamp.now().year
+    df_merged = df_merged[df_merged["year"] >= current_year - 5].copy()
+    
     pattern = calculate_monthly_pattern(df_merged)
 
     # 核心指标
@@ -370,7 +388,7 @@ def main():
         display_df = display_df.sort_values("日期", ascending=False)
 
         st.dataframe(
-            display_df.style.applymap(
+            display_df.style.map(
                 lambda x: "color: red" if isinstance(x, float) and x > 0 else "color: blue" if isinstance(x, float) and x < 0 else "",
                 subset=["相对涨幅(%)"],
             ),
