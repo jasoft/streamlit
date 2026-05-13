@@ -64,13 +64,15 @@ def calculate_relative_performance(
     df_hs300: pd.DataFrame, df_csi1000: pd.DataFrame
 ) -> pd.DataFrame:
     """计算相对表现 (中证1000 - 沪深300)"""
-    # 合并数据
+    # 合并数据，只基于年月匹配
     df_merged = pd.merge(
-        df_hs300[["date", "year", "month", "change_pct"]],
-        df_csi1000[["date", "year", "month", "change_pct"]],
+        df_hs300[["year", "month", "change_pct"]].rename(columns={"change_pct": "change_pct_hs300"}),
+        df_csi1000[["year", "month", "change_pct"]].rename(columns={"change_pct": "change_pct_csi1000"}),
         on=["year", "month"],
-        suffixes=("_hs300", "_csi1000"),
     )
+
+    # 添加日期列（用于趋势图）
+    df_merged["date"] = pd.to_datetime(df_merged["year"].astype(str) + "-" + df_merged["month"].astype(str) + "-01")
 
     # 计算相对涨幅
     df_merged["relative"] = df_merged["change_pct_csi1000"] - df_merged["change_pct_hs300"]
@@ -108,7 +110,7 @@ def calculate_monthly_pattern(df: pd.DataFrame) -> pd.DataFrame:
 
 def create_heatmap(df: pd.DataFrame) -> go.Figure:
     """创建年度-月份热力图"""
-    # 准备数据矩阵
+    # 准备数据矩阵 - 完整的1-12月
     years = sorted(df["year"].unique())
     months = list(range(1, 13))
 
@@ -149,7 +151,7 @@ def create_heatmap(df: pd.DataFrame) -> go.Figure:
     )
 
     fig.update_layout(
-        title="沪深300 vs 中证1000 月度相对表现热力图<br><sub>红色=中证1000更强, 蓝色=沪深300更强</sub>",
+        title="沪深300 vs 中证1000 月度相对表现热力图<br><sub>红色=中证1000更强, 蓝色=沪深300更强 | 空白=无数据</sub>",
         xaxis_title="月份",
         yaxis_title="年份",
         height=400,
