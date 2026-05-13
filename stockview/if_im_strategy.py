@@ -85,25 +85,39 @@ def get_seasonal_score() -> tuple:
     return im_score, if_score, f"{month}月历史胜率: IM {data['im_win_rate']}%, 平均收益差 {data['avg_spread']:+.2f}%"
 
 
-def get_volume_score(quotes: dict) -> tuple:
-    """成交量评分：基于成交额和换手率"""
-    if not quotes:
-        return 5, 5, "无数据"
+def get_volume_score() -> tuple:
+    """成交量评分：基于总成交额（从market_heat获取）"""
+    try:
+        from stockview.main import get_market_heat
+        data = get_market_heat()
+        if data is None:
+            return 5, 5, "无数据"
 
-    total_amount = sum(q.get("amount", 0) for q in quotes.values())
+        # data["数值"][8] = 预计今日总成交额（亿）
+        total_amount = data["数值"][8] if data["数值"][8] else data["数值"][9]
 
-    # 成交额判断
-    if total_amount > 15000:
-        im_score, if_score = 8, 2
-        reason = f"成交额 {total_amount/10000:.1f}万亿 (放量，利多IM)"
-    elif total_amount > 10000:
-        im_score, if_score = 6, 4
-        reason = f"成交额 {total_amount/10000:.1f}万亿 (温和)"
-    else:
-        im_score, if_score = 3, 7
-        reason = f"成交额 {total_amount/10000:.1f}万亿 (缩量，利多IF)"
+        # 成交额判断（单位：亿）
+        # 2.5万亿以上为高成交，利多IM
+        if total_amount > 25000:
+            im_score, if_score = 9, 1
+            reason = f"成交额 {total_amount/10000:.1f}万亿 (高成交，强利多IM)"
+        elif total_amount > 20000:
+            im_score, if_score = 7, 3
+            reason = f"成交额 {total_amount/10000:.1f}万亿 (放量，利多IM)"
+        elif total_amount > 15000:
+            im_score, if_score = 5, 5
+            reason = f"成交额 {total_amount/10000:.1f}万亿 (温和)"
+        elif total_amount > 10000:
+            im_score, if_score = 3, 7
+            reason = f"成交额 {total_amount/10000:.1f}万亿 (缩量，利多IF)"
+        else:
+            im_score, if_score = 1, 9
+            reason = f"成交额 {total_amount/10000:.1f}万亿 (极度缩量，强利多IF)"
 
-    return im_score, if_score, reason
+        return im_score, if_score, reason
+    except Exception as e:
+        logger.error(f"获取成交量数据失败: {e}")
+        return 5, 5, f"获取失败: {e}"
 
 
 def get_sentiment_score() -> tuple:
@@ -354,7 +368,7 @@ def render_if_im_strategy_page():
     scores["季节性"] = {"im": im_s, "if": if_s, "reason": reason, "weight": 15}
 
     # 2. 成交量
-    im_s, if_s, reason = get_volume_score(quotes)
+    im_s, if_s, reason = get_volume_score()
     scores["成交量"] = {"im": im_s, "if": if_s, "reason": reason, "weight": 20}
 
     # 3. 牛熊氛围
