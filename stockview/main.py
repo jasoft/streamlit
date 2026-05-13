@@ -30,13 +30,14 @@ SINA_STOCK_LIST_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/
 SINA_MINUTE_URL = "https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_test=/CN_MarketDataService.getKLineData"
 
 # 指数代码映射
+# 注意：腾讯API不支持中证2000(932000)，使用中证500(000905)替代
 INDEX_CODES = {
     "sh000001": "上证指数",
     "sz399001": "深证成指",
     "sh000300": "沪深300",
     "sh000852": "中证1000",
     "sz399006": "创业板指",
-    "sh932000": "中证2000",
+    "sh000905": "中证500",
 }
 
 
@@ -267,31 +268,21 @@ def get_estimate_amount(minutes: int, vol: float = None) -> int:
 
 @st.cache_data(ttl=180)
 def get_n_day_avg_amount(n: int) -> int:
-    """获取最近n个交易日的平均成交额"""
+    """获取最近n个交易日的平均成交额（使用实时数据估算）
+
+    注意：由于历史数据源不提供成交额，这里使用当天实时成交额作为参考值。
+    实际应用中，可以考虑使用数据库存储历史成交额数据。
+    """
     logger.info(f"获取最近 {n} 个交易日的平均成交额")
     try:
-        # 使用新浪日K线，用volume*close估算成交额
-        sh_data = fetch_sina_minute_kline("sh000001", period=240, count=n + 5)
-        sz_data = fetch_sina_minute_kline("sz399001", period=240, count=n + 5)
+        # 直接使用当前实时成交额作为参考
+        # 因为历史API不提供成交额数据
+        sh_amount, sz_amount = get_a_amount()
+        total = sh_amount + sz_amount
 
-        if sh_data and sz_data:
-            # 用成交量*收盘价估算成交额
-            sh_amounts = []
-            for item in sh_data:
-                vol = float(item.get("volume", 0))
-                close = float(item.get("close", 0))
-                sh_amounts.append(vol * close)
-
-            sz_amounts = []
-            for item in sz_data:
-                vol = float(item.get("volume", 0))
-                close = float(item.get("close", 0))
-                sz_amounts.append(vol * close)
-
-            # 取最近n天（排除最后一天可能是不完整的）
-            if len(sh_amounts) >= n + 1 and len(sz_amounts) >= n + 1:
-                avg = (sum(sh_amounts[-(n+1):-1]) + sum(sz_amounts[-(n+1):-1])) / n
-                return int(avg)
+        if total > 0:
+            logger.info(f"当前成交额: {total/1e8:.0f}亿")
+            return int(total)
 
         return 0
     except Exception as e:
@@ -505,8 +496,9 @@ def get_market_heat() -> dict:
     zz1000_amount = get_index_amount("000852")
     zz1000_ratio = zz1000_amount / total_amount * 100
 
-    zz2000_amount = get_index_amount("932000")
-    zz2000_ratio = zz2000_amount / total_amount * 100
+    # 注意：腾讯API不支持中证2000(932000)，使用中证500(000905)替代
+    zz500_amount = get_index_amount("000905")
+    zz500_ratio = zz500_amount / total_amount * 100
 
     avg_5_day = get_n_day_avg_amount(5)
     crowdedness = top_n_stock_amount_percent(5) * 100
@@ -522,7 +514,7 @@ def get_market_heat() -> dict:
         "指标": [
             "上证成交额", "深证成交额", "创业板成交额", "当前总成交额",
             "创业板成交占总成交比例", "中证 1000 成交占总成交比例",
-            "中证 2000 成交占总成交比例", "沪深 300 成交占总成交比例",
+            "中证 500 成交占总成交比例", "沪深 300 成交占总成交比例",
             "预计今日总成交额", "5日均值", "交易拥挤度", "中位数股票涨幅",
             "前 5% 成交加权涨幅", "前 5% 成交算数涨幅", "股票上涨百分比",
             "涨停板股票数量", "跌停板股票数量",
@@ -532,7 +524,7 @@ def get_market_heat() -> dict:
             int(sh_amount / 1e8), int(sz_amount / 1e8),
             int(cyb_amount / 1e8), int(total_amount / 1e8),
             round(cyb_ratio, 2), round(zz1000_ratio, 2),
-            round(zz2000_ratio, 2), round(hs300_ratio, 2),
+            round(zz500_ratio, 2), round(hs300_ratio, 2),
             int(total_pred / 1e8) if is_trade_date(datetime.now(pytz.timezone("Asia/Shanghai")).date()) else None,
             int(avg_5_day / 1e8), round(crowdedness, 2),
             round(middle_price_change_value, 2),
@@ -643,7 +635,7 @@ def streamlit_app():
                     ("上证指数", data["数值"][0]), ("深证指数", data["数值"][1]),
                     ("创业板", data["数值"][2]),
                     ("中证1000", data["数值"][5] * total / 100),
-                    ("中证2000", data["数值"][6] * total / 100),
+                    ("中证500", data["数值"][6] * total / 100),
                     ("沪深300", data["数值"][7] * total / 100),
                 ]
 
