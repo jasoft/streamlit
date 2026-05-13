@@ -3,6 +3,8 @@ from datetime import date, datetime
 import pandas as pd
 from stockview.log import logger
 import pytz
+import os
+import sys
 
 # from streamlit_autorefresh import st_autorefresh
 import akshare
@@ -22,10 +24,6 @@ from stockview.helpers import during_market_time, minutes_since_market_open
 from streamlit_autorefresh import st_autorefresh
 from stockview.index_spread import create_spread_chart
 from stockview.index_comparison import render_index_comparison_page
-import sys
-import os
-
-ak = CacheWrapper(akshare, cache_time=180)
 
 
 @st.cache_data(ttl=60)
@@ -211,7 +209,7 @@ def get_n_day_avg_amount(n):
         return sh_amount + sz_amount
     except Exception as e:
         logger.error(f"获取最近 {n} 个交易日的平均成交额时发生错误：{str(e)}")
-        return 0, 0
+        return 0
 
 
 @st.cache_data(ttl=180)
@@ -825,235 +823,251 @@ def streamlit_app():
 
         try:
             data = get_market_heat()
-        except Exception:
-            st.error("开盘期间，无法获取数据，请稍后刷新。")
-            return
+        except Exception as e:
+            logger.error(f"获取市场数据失败: {str(e)}")
+            st.error(f"获取数据失败，请稍后刷新。错误: {str(e)}")
+            data = None
 
-        # 使用多列布局显示主要指标
-        metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
+        if data is None:
+            st.warning("暂无数据，请稍后刷新")
+        else:
+            # 使用多列布局显示主要指标
+            metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
 
-        with metrics_col1:
-            avg_amount = data["数值"][9]  # 5日均值（亿）
-            pred_amount = data["数值"][8]  # 预估成交额（亿）
+            with metrics_col1:
+                avg_amount = data["数值"][9]  # 5日均值（亿）
+                pred_amount = data["数值"][8]  # 预估成交额（亿）
 
-            # 预估成交额指标
-            if pred_amount is not None:
-                delta_vs_avg = pred_amount - avg_amount
-                delta_color = "normal" if delta_vs_avg > 0 else "inverse"
+                # 预估成交额指标
+                if pred_amount is not None:
+                    delta_vs_avg = pred_amount - avg_amount
+                    delta_color = "normal" if delta_vs_avg > 0 else "inverse"
+                    st.metric(
+                        "预估成交额",
+                        f"{pred_amount:,}亿",
+                        delta=f"{delta_vs_avg:+,}亿 vs 5日均值",
+                        delta_color=delta_color,
+                    )
+
+            with metrics_col2:
+                up_ratio = data["数值"][14]  # 上涨占比（%）
+                st.metric("上涨占比", f"{up_ratio:.1f}%")
+
+            with metrics_col3:
+                limit_up = data["数值"][15]  # 涨停数量
+                limit_down = data["数值"][16]  # 跌停数量
                 st.metric(
-                    "预估成交额",
-                    f"{pred_amount:,}亿",
-                    delta=f"{delta_vs_avg:+,}亿 vs 5日均值",
-                    delta_color=delta_color,
+                    "涨停数量",
+                    str(limit_up),
+                    delta=f"-跌停 {limit_down}",
+                    delta_color="inverse",
                 )
 
-        with metrics_col2:
-            up_ratio = data["数值"][14]  # 上涨占比（%）
-            st.metric("上涨占比", f"{up_ratio:.1f}%")
+            with metrics_col4:
+                middle_change = data["数值"][11]  # 中位数涨幅（%）
+                st.metric(
+                    "中位数涨幅",
+                    f"{middle_change:.2f}%",
+                    delta=None,
+                    delta_color="inverse" if middle_change > 0 else "normal",
+                )
 
-        with metrics_col3:
-            limit_up = data["数值"][15]  # 涨停数量
-            limit_down = data["数值"][16]  # 跌停数量
-            st.metric(
-                "涨停数量",
-                str(limit_up),
-                delta=f"-跌停 {limit_down}",
-                delta_color="inverse",
-            )
+            # 分两列显示详细数据
+            col1, col2 = st.columns(2)
 
-        with metrics_col4:
-            middle_change = data["数值"][11]  # 中位数涨幅（%）
-            st.metric(
-                "中位数涨幅",
-                f"{middle_change:.2f}%",
-                delta=None,
-                delta_color="inverse" if middle_change > 0 else "normal",
-            )
+            with col1:
 
-        # 分两列显示详细数据
-        col1, col2 = st.columns(2)
+                def get_progress_html(value_pct):
+                    """根据百分比返回进度条HTML"""
 
-        with col1:
+                    def get_color(pct):
+                        if pct <= 20:
+                            return "#90d4a2"  # 绿色
+                        elif pct <= 40:
+                            return "#27ae60"  # 深绿色
+                        elif pct <= 60:
+                            return "#f1c40f"  # 黄色
+                        elif pct <= 80:
+                            return "#e67e22"  # 橙色
+                        else:
+                            return "#e74c3c"  # 红色
 
-            def get_progress_html(value_pct):
-                """根据百分比返回进度条HTML"""
-
-                def get_color(pct):
-                    if pct <= 20:
-                        return "#90d4a2"  # 绿色
-                    elif pct <= 40:
-                        return "#27ae60"  # 深绿色
-                    elif pct <= 60:
-                        return "#f1c40f"  # 黄色
-                    elif pct <= 80:
-                        return "#e67e22"  # 橙色
-                    else:
-                        return "#e74c3c"  # 红色
-
-                color = get_color(value_pct)
-                width = value_pct  # percentage已经是百分比值，不需要再乘100
-                return f"""
-                    <div style="
-                        width: 100%;
-                        background-color: #eee;
-                        border-radius: 3px;
-                        padding: 3px;
-                        box-sizing: border-box;
-                    ">
+                    color = get_color(value_pct)
+                    width = value_pct  # percentage已经是百分比值，不需要再乘100
+                    return f"""
                         <div style="
-                            width: {width}%;
-                            height: 20px;
-                            background-color: {color};
-                            border-radius: 2px;
-                            transition: width 0.3s ease;
-                        "></div>
-                    </div>
-                """
+                            width: 100%;
+                            background-color: #eee;
+                            border-radius: 3px;
+                            padding: 3px;
+                            box-sizing: border-box;
+                        ">
+                            <div style="
+                                width: {width}%;
+                                height: 20px;
+                                background-color: {color};
+                                border-radius: 2px;
+                                transition: width 0.3s ease;
+                            "></div>
+                        </div>
+                    """
 
-            st.markdown(
-                """
-            <style>
-            .index-progress {
-                margin-bottom: 1rem;
-            }
-            .index-progress .label {
-                margin-bottom: 0.5rem;
-                font-weight: 500;
-                color: #333;
-            }
-            .index-progress .value {
-                font-size: 0.9rem;
-                color: #666;
-                margin-top: 0.3rem;
-                text-align: right;
-            }
-            </style>
-            """,
-                unsafe_allow_html=True,
-            )
+                st.markdown(
+                    """
+                <style>
+                .index-progress {
+                    margin-bottom: 1rem;
+                }
+                .index-progress .label {
+                    margin-bottom: 0.5rem;
+                    font-weight: 500;
+                    color: #333;
+                }
+                .index-progress .value {
+                    font-size: 0.9rem;
+                    color: #666;
+                    margin-top: 0.3rem;
+                    text-align: right;
+                }
+                </style>
+                """,
+                    unsafe_allow_html=True,
+                )
 
-            st.markdown("#### 💰 指数成交占比")
+                st.markdown("#### 💰 指数成交占比")
 
-            # 总成交额（亿）
-            total = data["数值"][3]
+                # 总成交额（亿）
+                total = data["数值"][3]
 
-            # 定义指数数据
-            indices = [
-                ("上证指数", data["数值"][0]),
-                ("深证指数", data["数值"][1]),
-                ("创业板", data["数值"][2]),
-                ("中证1000", data["数值"][5] * total / 100),  # 转换百分比为实际值
-                ("中证2000", data["数值"][6] * total / 100),  # 转换百分比为实际值
-                ("沪深300", data["数值"][7] * total / 100),  # 转换百分比为实际值
-            ]
+                # 定义指数数据
+                indices = [
+                    ("上证指数", data["数值"][0]),
+                    ("深证指数", data["数值"][1]),
+                    ("创业板", data["数值"][2]),
+                    ("中证1000", data["数值"][5] * total / 100),  # 转换百分比为实际值
+                    ("中证2000", data["数值"][6] * total / 100),  # 转换百分比为实际值
+                    ("沪深300", data["数值"][7] * total / 100),  # 转换百分比为实际值
+                ]
 
-            # 显示各指数进度条
-            for name, amount in indices:
-                st.markdown('<div class="index-progress">', unsafe_allow_html=True)
-                cols = st.columns([2, 8])
+                # 显示各指数进度条
+                for name, amount in indices:
+                    st.markdown('<div class="index-progress">', unsafe_allow_html=True)
+                    cols = st.columns([2, 8])
+                    with cols[0]:
+                        st.markdown(
+                            f'<div class="label">{name}</div>', unsafe_allow_html=True
+                        )
+                    with cols[1]:
+                        percentage = (amount / total) * 100  # 转换为百分比
+                        progress_html = get_progress_html(percentage)
+                        st.markdown(progress_html, unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="value">{percentage:.1f}%</div>',
+                            unsafe_allow_html=True,
+                        )
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                # 显示总成交额和5日均值
+                cols = st.columns(2)
                 with cols[0]:
-                    st.markdown(
-                        f'<div class="label">{name}</div>', unsafe_allow_html=True
-                    )
+                    st.info(f"**总成交额**: {data['数值'][3]} 亿")
                 with cols[1]:
-                    percentage = (amount / total) * 100  # 转换为百分比
-                    progress_html = get_progress_html(percentage)
-                    st.markdown(progress_html, unsafe_allow_html=True)
-                    st.markdown(
-                        f'<div class="value">{percentage:.1f}%</div>',
-                        unsafe_allow_html=True,
-                    )
-                st.markdown("</div>", unsafe_allow_html=True)
+                    st.info(f"**5日均值**: {data['数值'][9]} 亿")
 
-            # 显示总成交额和5日均值
-            cols = st.columns(2)
-            with cols[0]:
-                st.info(f"**总成交额**: {data['数值'][3]} 亿")
-            with cols[1]:
-                st.info(f"**5日均值**: {data['数值'][9]} 亿")
-
-        with col2:
-            st.markdown("#### 💡 情绪指标")
-            for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
-                # 处理带颜色标记的值
-                output = f"**{item}**: {value}"
-                # More Pythonic way to check for specific substrings
-                if any(keyword in item for keyword in ["百分比", "涨幅"]):
-                    output = output + "%"
-                if value > 0:
-                    st.success(output)
-                else:
-                    st.error(output)
+            with col2:
+                st.markdown("#### 💡 情绪指标")
+                for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
+                    # 处理带颜色标记的值
+                    output = f"**{item}**: {value}"
+                    # More Pythonic way to check for specific substrings
+                    if any(keyword in item for keyword in ["百分比", "涨幅"]):
+                        output = output + "%"
+                    if value > 0:
+                        st.success(output)
+                    else:
+                        st.error(output)
 
     with tab2:
         # 第二个tab显示龙头股分析
         st.markdown("### 🔥 龙头股活跃度分析")
-        data = get_market_heat()
+        try:
+            data = get_market_heat()
+        except Exception as e:
+            logger.error(f"获取龙头股数据失败: {str(e)}")
+            st.error(f"获取数据失败，请稍后刷新。错误: {str(e)}")
+            data = None
 
-        # 显示平均市值
-        st.info(f"#### 📊 {data['指标'][17]}\n{data['数值'][17]}")
+        if data is None:
+            st.warning("暂无数据，请稍后刷新")
+        else:
+            # 显示平均市值
+            st.info(f"#### 📊 {data['指标'][17]}\n{data['数值'][17]}")
 
-        if data["数值"][18] is not None:
-            # 增加过滤和排序选项
-            col1, col2 = st.columns([2, 2])
-            with col1:
-                sort_by = st.selectbox(
-                    "排序依据", ["成交额", "涨跌幅", "换手率", "总市值"], index=0
-                )
+            if data["数值"][18] is not None:
+                # 增加过滤和排序选项
+                col1, col2 = st.columns([2, 2])
+                with col1:
+                    sort_by = st.selectbox(
+                        "排序依据", ["成交额", "涨跌幅", "换手率", "总市值"], index=0
+                    )
 
-            # 获取原始DataFrame
-            df = data["数值"][18]
+                # 获取原始DataFrame
+                df = data["数值"][18]
 
-            # 根据选择的列进行排序
-            if sort_by == "涨跌幅":
-                df = df.sort_values(
-                    by="涨跌幅",
-                    ascending=False,
-                    key=lambda x: x.str.rstrip("%").astype(float),
-                )
-            elif sort_by in ["成交额", "总市值"]:
-                df = df.sort_values(
-                    by=sort_by,
-                    ascending=False,
-                    key=lambda x: x.str.rstrip("亿").astype(float),
-                )
-            elif sort_by == "换手率":
-                df = df.sort_values(
-                    by="换手率",
-                    ascending=False,
-                    key=lambda x: x.str.rstrip("%").astype(float),
-                )
+                # 根据选择的列进行排序
+                if sort_by == "涨跌幅":
+                    df = df.sort_values(
+                        by="涨跌幅",
+                        ascending=False,
+                        key=lambda x: x.str.rstrip("%").astype(float),
+                    )
+                elif sort_by in ["成交额", "总市值"]:
+                    df = df.sort_values(
+                        by=sort_by,
+                        ascending=False,
+                        key=lambda x: x.str.rstrip("亿").astype(float),
+                    )
+                elif sort_by == "换手率":
+                    df = df.sort_values(
+                        by="换手率",
+                        ascending=False,
+                        key=lambda x: x.str.rstrip("%").astype(float),
+                    )
 
-            # 美化数据表格显示
-            styled_df = (
-                df.style.map(color_negative_red, subset=["涨跌幅"])
-                .set_properties(
-                    **{
-                        "background-color": "#f0f2f6",
-                        "color": "#1f2937",
-                        "font-size": "14px",
-                    }
-                )
-                .set_table_styles(
-                    [
-                        {
-                            "selector": "th",
-                            "props": [
-                                ("background-color", "#dfe3e8"),
-                                ("color", "#374151"),
-                            ],
+                # 美化数据表格显示
+                styled_df = (
+                    df.style.map(color_negative_red, subset=["涨跌幅"])
+                    .set_properties(
+                        **{
+                            "background-color": "#f0f2f6",
+                            "color": "#1f2937",
+                            "font-size": "14px",
                         }
-                    ]
+                    )
+                    .set_table_styles(
+                        [
+                            {
+                                "selector": "th",
+                                "props": [
+                                    ("background-color", "#dfe3e8"),
+                                    ("color", "#374151"),
+                                ],
+                            }
+                        ]
+                    )
                 )
-            )
 
-            st.dataframe(
-                styled_df, use_container_width=True, height=400, hide_index=False
-            )
+                st.dataframe(
+                    styled_df, use_container_width=True, height=400, hide_index=False
+                )
 
     with tab3:
         # 第三个tab显示指数收益差分析
         streamlit_spread_chart()
+
+    with tab4:
+        # 第四个tab显示指数月度对比
+        render_index_comparison_page()
 
     # 数据更新时间和状态显示
     current_time = datetime.now()
