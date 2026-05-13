@@ -5,8 +5,10 @@
 """
 
 import json
+import logging
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -16,10 +18,38 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 
+# 设置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+CACHE_DIR = Path(__file__).parent / "stockview" / "akcache"
+CACHE_FILE = CACHE_DIR / "iwencai_index_cache.json"
+
 def fetch_index_data(index_name: str) -> Dict:
-    """调用 cli_index.py 获取指数月度涨跌幅数据"""
+    """调用 cli_index.py 获取指数数据，带持久化缓存"""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # 尝试加载缓存
+    cache = {}
+    if CACHE_FILE.exists():
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+        except Exception as e:
+            logger.error(f"读取缓存文件失败: {e}")
+
+    # 检查缓存是否有效 (今天之内)
+    today = datetime.now().strftime("%Y%m%d")
+    if index_name in cache:
+        cached_data = cache[index_name]
+        if cached_data.get("cache_date") == today:
+            logger.info(f"命中本地缓存: {index_name}")
+            return cached_data["data"]
+
+    # 调用脚本获取新数据
+    logger.info(f"缓存未命中或已过期，正在调用 cli_index.py 获取 {index_name} 数据...")
     script_path = Path(__file__).parent / "scripts" / "cli_index.py"
-    # 使用更长的时间范围确保数据完整性
     query = f"{index_name}2015年至今月度涨跌幅"
 
     result = subprocess.run(
@@ -33,7 +63,18 @@ def fetch_index_data(index_name: str) -> Dict:
         return {}
 
     try:
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
+        if data.get("success"):
+            # 更新缓存
+            cache[index_name] = {
+                "cache_date": today,
+                "data": data
+            }
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+            return data
+        else:
+            return data
     except json.JSONDecodeError:
         st.error(f"解析 {index_name} 数据 JSON 失败")
         return {}
