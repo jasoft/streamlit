@@ -19,6 +19,6 @@
   },
   "homepage": "https://github.com/jasoft/streamlit#readme",
   "dependencies": {
-    "playwright": "^1.58.2"
+    "playwright": "^1.60.0"
   }
 }

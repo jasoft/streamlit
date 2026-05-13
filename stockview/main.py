@@ -121,6 +121,11 @@ def fetch_all_sina_stocks() -> pd.DataFrame:
     if not all_data:
         return pd.DataFrame()
     df = pd.DataFrame(all_data)
+    # 确保数值列类型正确
+    numeric_cols = ["trade", "pricechange", "changepercent", "buy", "sell", "settlement", "open", "high", "low"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 
