@@ -61,7 +61,11 @@ def render_index_amount_compare_page() -> None:
 
     lookback_days = st.slider("回看天数", min_value=120, max_value=730, value=365, step=10)
 
-    df = build_index_amount_dataframe(lookback_days)
+    try:
+        df = build_index_amount_dataframe(lookback_days)
+    except Exception as exc:
+        st.error(f"指数数据获取失败: {exc}")
+        return
 
     st.dataframe(
         df[

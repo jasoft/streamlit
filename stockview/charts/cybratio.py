@@ -56,7 +56,11 @@ def render_cyb_ratio_page() -> None:
     st.caption("用创业板成交额占沪深总成交额的比重，观察小盘成长情绪与大盘位置。")
 
     lookback_days = st.slider("回看交易日", min_value=60, max_value=500, value=250, step=10)
-    df_result = build_cyb_ratio_dataframe(lookback_days)
+    try:
+        df_result = build_cyb_ratio_dataframe(lookback_days)
+    except Exception as exc:
+        st.error(f"创业板成交占比数据获取失败: {exc}")
+        return
 
     base = alt.Chart(df_result).encode(x="date:T")
     bars = base.mark_bar(color="steelblue").encode(

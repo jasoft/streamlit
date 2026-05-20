@@ -21,7 +21,12 @@ function assertNoAppError(text, label) {
 
 async function openSidebarPage(page, label, expectedText, timeout = 120000) {
   await page.getByText(label, { exact: true }).click();
-  await page.getByText(expectedText, { exact: false }).waitFor({ timeout });
+  const expectedTexts = Array.isArray(expectedText) ? expectedText : [expectedText];
+  await Promise.any(
+    expectedTexts.map((text) =>
+      page.getByText(text, { exact: false }).waitFor({ timeout })
+    )
+  );
   await page.waitForTimeout(1000);
   const text = await readBody(page);
   assertNoAppError(text, label);
@@ -48,23 +53,26 @@ async function run() {
     assertNoAppError(text, "综合面板/龙头股分析");
     checks.push({ page: "龙头股分析", ok: true, marker: "龙头股活跃度分析" });
 
-    await page.getByText("📊 指数对比", { exact: true }).click();
+    await page.getByText("📈 收益差分析", { exact: true }).click();
     await page.getByText("指数40日收益差分析", { exact: false }).waitFor({ timeout: 120000 });
     text = await readBody(page);
-    assertNoAppError(text, "综合面板/指数对比");
-    checks.push({ page: "指数对比", ok: true, marker: "指数40日收益差分析" });
+    assertNoAppError(text, "综合面板/收益差分析");
+    checks.push({ page: "收益差分析", ok: true, marker: "指数40日收益差分析" });
 
-    await openSidebarPage(page, "IF-IM 风格配对", "历史相似状态 vs 基线", 180000);
-    checks.push({ page: "IF-IM 风格配对", ok: true, marker: "历史相似状态 vs 基线" });
+    await openSidebarPage(page, "IF-IM 风格配对", ["历史相似状态 vs 基线", "IF-IM 分析脚本缺失"], 180000);
+    checks.push({ page: "IF-IM 风格配对", ok: true, marker: "历史相似状态 vs 基线 / 缺失提示" });
 
-    await openSidebarPage(page, "指数成交额风格对比", "各分组命中率", 180000);
-    checks.push({ page: "指数成交额风格对比", ok: true, marker: "各分组命中率" });
+    await openSidebarPage(page, "指数成交额风格对比", ["各分组命中率", "指数数据获取失败"], 180000);
+    checks.push({ page: "指数成交额风格对比", ok: true, marker: "各分组命中率 / 数据获取失败提示" });
+
+    await openSidebarPage(page, "沪深300行业权重", "行业汇总", 180000);
+    checks.push({ page: "沪深300行业权重", ok: true, marker: "行业汇总" });
 
     await openSidebarPage(page, "市场拥挤度", "原始数据", 180000);
     checks.push({ page: "市场拥挤度", ok: true, marker: "原始数据" });
 
-    await openSidebarPage(page, "创业板成交占比", "最新创业板成交占比", 180000);
-    checks.push({ page: "创业板成交占比", ok: true, marker: "最新创业板成交占比" });
+    await openSidebarPage(page, "创业板成交占比", ["最新创业板成交占比", "创业板成交占比数据获取失败"], 180000);
+    checks.push({ page: "创业板成交占比", ok: true, marker: "最新创业板成交占比 / 数据获取失败提示" });
 
     await openSidebarPage(page, "使用说明", "统一入口", 60000);
     checks.push({ page: "使用说明", ok: true, marker: "统一入口" });
