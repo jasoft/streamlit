@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+outputs/
+stockview/stockview.log
+stockview/akcache/*.json
+tests/
+node_modules/
+*.md
+deploy.sh
+package*.json

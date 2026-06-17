@@ -17,4 +17,4 @@ RUN uv sync
 EXPOSE 8501
 
 # 运行 Streamlit 应用
-CMD ["uv","run","streamlit", "run", "stockview/main.py"]
+CMD ["uv", "run", "streamlit", "run", "stockview/app.py"]
