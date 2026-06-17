@@ -1,29 +1,37 @@
 #!/bin/bash
+set -e
 
-echo "Deploying streamlit app..."
+APP_NAME="stockview"
+ENV_FILE=".env.production"
 
-# 切换到工作目录
-cd /root/streamlit
+echo "Deploying ${APP_NAME}..."
 
-# 保存当前 commit hash
-BEFORE_PULL=$(git rev-parse HEAD)
-
-# 获取最新代码
+# 拉取最新代码
 unset GIT_DIR
 git pull origin main
 
-# 保存 pull 后的 commit hash
-AFTER_PULL=$(git rev-parse HEAD)
+# 构建镜像
+DOCKER_HOST=ssh://docker docker build -t ${APP_NAME} .
 
-# 检查是否有更新
-if [ "$BEFORE_PULL" == "$AFTER_PULL" ]; then
-    echo "No updates found, exiting..."
-    exit 0
+# 停止并删除旧容器
+DOCKER_HOST=ssh://docker docker rm -f ${APP_NAME} 2>/dev/null || true
+
+# 启动新容器，加载环境变量文件
+if [ -f "${ENV_FILE}" ]; then
+  echo "Loading env from ${ENV_FILE}"
+  DOCKER_HOST=ssh://docker docker run -d \
+    --name ${APP_NAME} \
+    -p 8501:8501 \
+    --env-file ${ENV_FILE} \
+    --restart unless-stopped \
+    ${APP_NAME}
 else
-    echo "Updates found, rebuilding Docker container..."
-    # 重建并重启 Docker 容器
-    docker build -t stockview .
-    docker rm -f stockview
-    docker run -d --name stockview -p 8501:8501 stockview
-    echo "Deployment completed"
+  echo "WARNING: ${ENV_FILE} not found, starting without env file"
+  DOCKER_HOST=ssh://docker docker run -d \
+    --name ${APP_NAME} \
+    -p 8501:8501 \
+    --restart unless-stopped \
+    ${APP_NAME}
 fi
+
+echo "Deployment completed. Service: http://docker.home:8501"
