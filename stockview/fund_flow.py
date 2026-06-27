@@ -387,6 +387,29 @@ def _render_metric_row(snapshot: FundFlowSnapshot, used_kline_rows: int) -> None
     st.caption(f"分时明细已加载 {used_kline_rows} 条（前 {min(len(snapshot.rows), 12)} 个板块并行拉取）。")
 
 
+def _build_sector_color_map(names: Iterable[str]) -> Dict[str, str]:
+    """为板块名称生成稳定的、尽量不重复的颜色映射。"""
+    palette = [
+        "#E6194B", "#3CB44B", "#4363D8", "#F58231", "#42D4F4",
+        "#F032E6", "#FABED4", "#469990", "#DCBEFF", "#9A6324",
+        "#800000", "#AAFFC3", "#000075", "#A9A9A9", "#FFE119",
+        "#E6BEFF", "#808000", "#FFD8B1", "#000000", "#911EB4",
+        "#808080", "#BFEF45", "#E6194B", "#3CB44B", "#4363D8",
+    ]
+    mapping: Dict[str, str] = {}
+    for idx, name in enumerate(names):
+        # 先用调色板，保证颜色足够醒目且不重复；超出后才做 hash 补色
+        if idx < len(palette):
+            mapping[name] = palette[idx]
+        else:
+            digest = hashlib.md5(name.encode("utf-8")).hexdigest()
+            r = int(digest[0:2], 16) % 200 + 30
+            g = int(digest[2:4], 16) % 200 + 30
+            b = int(digest[4:6], 16) % 200 + 30
+            mapping[name] = f"#{r:02X}{g:02X}{b:02X}"
+    return mapping
+
+
 def _plot_sector_trend(df: pd.DataFrame) -> go.Figure:
     if df.empty:
         fig = go.Figure()
@@ -396,13 +419,15 @@ def _plot_sector_trend(df: pd.DataFrame) -> go.Figure:
             margin=dict(l=16, r=16, t=40, b=16),
         )
         return fig
+    names = list(df["板块"].drop_duplicates())
+    color_map = _build_sector_color_map(names)
     fig = px.line(
         df,
         x="时间",
         y="主力净流入",
         color="板块",
         markers=False,
-        color_discrete_sequence=px.colors.qualitative.D3,
+        color_discrete_map=color_map,
     )
     fig.update_traces(hovertemplate="板块: %{legendgroup}<br>时间: %{x|%H:%M}<br>主力净流入: %{y:,.0f}<extra></extra>")
     fig.update_layout(
@@ -441,7 +466,7 @@ def _render_rank_table(snapshot: FundFlowSnapshot, selected_names: List[str]) ->
         "top_stock_name": "领涨/领跌股",
     }
     display_df = display_df.rename(columns={k: v for k, v in rename.items() if k in display_df.columns})
-    st.dataframe(display_df, width="stretch", hide_index=True)
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
 def render_fund_flow_page() -> None:
@@ -484,7 +509,7 @@ def render_fund_flow_page() -> None:
     _render_metric_row(snapshot, used_kline_rows)
 
     fig = _plot_sector_trend(trend_df)
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     tab_rank, tab_detail = st.tabs(["板块排行", "说明与口径"])
     with tab_rank:
@@ -515,4 +540,3 @@ def render_fund_flow_page() -> None:
         len(snapshot.rows),
         used_kline_rows,
     )
-
