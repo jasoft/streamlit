@@ -493,7 +493,7 @@ def _plot_sector_trend(df: pd.DataFrame, name_annotation: str = "end") -> go.Fig
         legend=dict(font=dict(size=11)),
         hovermode="x unified",
         margin=dict(l=16, r=16, t=44, b=16 + 120),
-        height=560,
+        height=800,
     )
     return fig
 
