@@ -62,6 +62,7 @@ _TODAY_COLUMNS = [
     "top_stock_name",
     "top_stock_code",
     "update_time",
+    "_code",
 ]
 
 _MULTI_DAY_COLUMNS = [
@@ -79,6 +80,7 @@ _MULTI_DAY_COLUMNS = [
     "small_net_ratio",
     "top_stock_name",
     "update_time",
+    "_code",
 ]
 
 _KLINE_COLUMNS = [
@@ -218,12 +220,11 @@ def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
             trade_date=_now_shanghai(),
             rows=[],
             code_name_map={},
-            name_code_map=_get_sector_code_name_map(sector_type),
+            name_code_map={},
             source_type="sector",
             indicator=indicator,
         )
-    name_code_map = _get_sector_code_name_map(sector_type)
-    code_name_map = {v: k for k, v in name_code_map.items()}
+
 
     if indicator == "today":
         rename_map = {
@@ -294,11 +295,14 @@ def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
     df = df.sort_values("main_net_inflow", ascending=False).reset_index(drop=True)
     df.insert(0, "rank", range(1, len(df) + 1))
 
+    name_code_map = dict(zip(df["name"], df["_code"]))
+    code_name_map = {v: k for k, v in name_code_map.items()}
+
     latest_ts = _now_shanghai()
     try:
         if not df.empty and "update_time" in df.columns:
             ts_raw = int(df.iloc[0]["update_time"])
-            latest_ts = pd.to_datetime(ts_raw, unit="s", tz="Asia/Shanghai")
+            latest_ts = pd.to_datetime(ts_raw, unit="s", utc=True).tz_convert("Asia/Shanghai")
     except Exception as e:  # noqa: BLE001
         logger.error("Failed to parse update_time: %s", e)
         latest_ts = _now_shanghai()
