@@ -483,6 +483,12 @@ def _plot_sector_trend(df: pd.DataFrame, name_annotation: str = "end") -> go.Fig
     fig.update_layout(
         title="A股实时板块资金流向（主力净流入）",
         xaxis_title="交易时间",
+        xaxis=dict(
+            rangebreaks=[
+                dict(bounds=[11.5, 13], pattern="hour"),
+                dict(bounds=[15, 9.5], pattern="hour"),
+            ]
+        ),
         yaxis_title="累计主力净流入（元）",
         legend_title="板块",
         legend=dict(font=dict(size=11)),
