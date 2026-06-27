@@ -1,0 +1,518 @@
+from __future__ import annotations
+
+import math
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Any, Dict, List
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import requests
+import streamlit as st
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from stockview.log import logger
+
+_EM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://data.eastmoney.com/",
+}
+
+_TRADING_WINDOWS = [
+    (pd.Timestamp("09:30:00").time(), pd.Timestamp("11:30:00").time()),
+    (pd.Timestamp("13:00:00").time(), pd.Timestamp("15:00:00").time()),
+]
+
+_INDICATOR_TO_FIELD = {
+    "today": "f62",
+    "5day": "f164",
+    "10day": "f174",
+}
+
+_INDICATOR_TO_STAT = {
+    "today": "1",
+    "5day": "5",
+    "10day": "10",
+}
+
+_SECTOR_FS = {
+    "industry": "m:90 t:2",
+    "concept": "m:90 t:3",
+    "region": "m:90 t:1",
+}
+
+_TODAY_COLUMNS = [
+    "name",
+    "change_pct",
+    "main_net_inflow",
+    "main_net_ratio",
+    "super_large_net_inflow",
+    "super_large_net_ratio",
+    "large_net_inflow",
+    "large_net_ratio",
+    "medium_net_inflow",
+    "medium_net_ratio",
+    "small_net_inflow",
+    "small_net_ratio",
+    "top_stock_name",
+    "top_stock_code",
+]
+
+_MULTI_DAY_COLUMNS = [
+    "name",
+    "change_pct",
+    "main_net_inflow",
+    "main_net_ratio",
+    "super_large_net_inflow",
+    "super_large_net_ratio",
+    "large_net_inflow",
+    "large_net_ratio",
+    "medium_net_inflow",
+    "medium_net_ratio",
+    "small_net_inflow",
+    "small_net_ratio",
+    "top_stock_name",
+]
+
+_KLINE_COLUMNS = [
+    "timestamp",
+    "main_net_inflow",
+    "small_net_inflow",
+    "medium_net_inflow",
+    "large_net_inflow",
+    "super_large_net_inflow",
+]
+
+
+def _make_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=4,
+        connect=4,
+        read=4,
+        status=4,
+        backoff_factor=0.6,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update(_EM_HEADERS)
+    return session
+
+
+@st.cache_resource(show_spinner=False)
+def _get_session() -> requests.Session:
+    return _make_session()
+
+
+def _now_shanghai() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="Asia/Shanghai")
+
+
+def _is_effective_trading_time(now: pd.Timestamp) -> bool:
+    current = now.time()
+    return any(start <= current <= end for start, end in _TRADING_WINDOWS)
+
+
+def _refresh_interval_seconds(now: pd.Timestamp) -> int:
+    return 8 if _is_effective_trading_time(now) else 45
+
+
+@dataclass(frozen=True)
+class FundFlowSnapshot:
+    trade_date: pd.Timestamp
+    rows: List[Dict[str, Any]]
+    code_name_map: Dict[str, str]
+    name_code_map: Dict[str, str]
+    source_type: str
+    indicator: str
+
+
+@dataclass(frozen=True)
+class FundFlowTrendPoint:
+    time_index: pd.Timestamp
+    main_net_inflow: float
+    super_large_net_inflow: float
+    large_net_inflow: float
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_sector_code_name_map(sector_type: str) -> Dict[str, str]:
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    params = {
+        "fid": "f62",
+        "po": "1",
+        "pz": "500",
+        "pn": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
+        "fs": _SECTOR_FS[sector_type],
+        "fields": "f12,f14,f3,f62,f1,f13",
+    }
+    session = _get_session()
+    resp = session.get(url, params=params, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()["data"]
+    total_page = math.ceil(data["total"] / 500)
+    rows: List[Dict[str, Any]] = []
+    for page in range(1, total_page + 1):
+        params.update({"pn": page})
+        if page != 1:
+            resp = session.get(url, params=params, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()["data"]
+        rows.extend(data["diff"])
+    name_code_map = {row["f14"]: row["f12"] for row in rows if "f14" in row and "f12" in row}
+    return name_code_map
+
+
+def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    fields_map = {
+        "today": "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124",
+        "5day": "f12,f14,f2,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f257,f258,f124",
+        "10day": "f12,f14,f2,f160,f174,f175,f176,f177,f178,f179,f180,f181,f182,f183,f260,f261,f124",
+    }
+    params = {
+        "pn": "1",
+        "pz": "500",
+        "po": "1",
+        "np": "1",
+        "ut": "b2884a393a59ad64002292a3e90d46a5",
+        "fltt": "2",
+        "invt": "2",
+        "fid0": _INDICATOR_TO_FIELD[indicator],
+        "fs": _SECTOR_FS[sector_type],
+        "stat": _INDICATOR_TO_STAT[indicator],
+        "fields": fields_map[indicator],
+        "rt": "52975239",
+        "_": int(time.time() * 1000),
+    }
+    session = _get_session()
+    resp = session.get(url, params=params, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()["data"]
+    total_page = math.ceil(data["total"] / 500) if data.get("total") else 0
+    frames: List[pd.DataFrame] = []
+    for page in range(1, total_page + 1):
+        params.update({"pn": page})
+        if page != 1:
+            resp = session.get(url, params=params, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()["data"]
+        frames.append(pd.DataFrame(data["diff"]))
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if df.empty:
+        return FundFlowSnapshot(
+            trade_date=_now_shanghai(),
+            rows=[],
+            code_name_map={},
+            name_code_map=_get_sector_code_name_map(sector_type),
+            source_type="sector",
+            indicator=indicator,
+        )
+    name_code_map = _get_sector_code_name_map(sector_type)
+    code_name_map = {v: k for k, v in name_code_map.items()}
+
+    if indicator == "today":
+        rename_map = {
+            "f12": "_code",
+            "f14": "name",
+            "f3": "change_pct",
+            "f62": "main_net_inflow",
+            "f184": "main_net_ratio",
+            "f66": "super_large_net_inflow",
+            "f69": "super_large_net_ratio",
+            "f72": "large_net_inflow",
+            "f75": "large_net_ratio",
+            "f78": "medium_net_inflow",
+            "f81": "medium_net_ratio",
+            "f84": "small_net_inflow",
+            "f87": "small_net_ratio",
+            "f204": "top_stock_name",
+            "f205": "top_stock_code",
+        }
+        columns = _TODAY_COLUMNS
+    elif indicator == "5day":
+        rename_map = {
+            "f12": "_code",
+            "f14": "name",
+            "f109": "change_pct",
+            "f164": "main_net_inflow",
+            "f165": "main_net_ratio",
+            "f166": "super_large_net_inflow",
+            "f167": "super_large_net_ratio",
+            "f168": "large_net_inflow",
+            "f169": "large_net_ratio",
+            "f170": "medium_net_inflow",
+            "f171": "medium_net_ratio",
+            "f172": "small_net_inflow",
+            "f173": "small_net_ratio",
+            "f257": "top_stock_name",
+            "f258": "top_stock_code",
+        }
+        columns = _MULTI_DAY_COLUMNS
+    else:
+        rename_map = {
+            "f12": "_code",
+            "f14": "name",
+            "f160": "change_pct",
+            "f174": "main_net_inflow",
+            "f175": "main_net_ratio",
+            "f176": "super_large_net_inflow",
+            "f177": "super_large_net_ratio",
+            "f178": "large_net_inflow",
+            "f179": "large_net_ratio",
+            "f180": "medium_net_inflow",
+            "f181": "medium_net_ratio",
+            "f182": "small_net_inflow",
+            "f183": "small_net_ratio",
+            "f260": "top_stock_name",
+            "f261": "top_stock_code",
+        }
+        columns = _MULTI_DAY_COLUMNS
+
+    df = df.rename(columns=rename_map)
+    df = df[[col for col in columns if col in df.columns]]
+    numeric_cols = [col for col in df.columns if col not in {"name", "top_stock_name", "top_stock_code", "_code"}]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.sort_values("main_net_inflow", ascending=False).reset_index(drop=True)
+    df.insert(0, "rank", range(1, len(df) + 1))
+
+    latest_ts = _now_shanghai()
+    try:
+        if not df.empty and "_code" in df.columns:
+            ts_raw = int(df.iloc[0]["_code"][:10])
+            latest_ts = pd.to_datetime(ts_raw, unit="s", tz="Asia/Shanghai")
+    except Exception:  # noqa: BLE001
+        latest_ts = _now_shanghai()
+
+    return FundFlowSnapshot(
+        trade_date=latest_ts,
+        rows=df.to_dict(orient="records"),
+        code_name_map=code_name_map,
+        name_code_map=name_code_map,
+        source_type="sector",
+        indicator=indicator,
+    )
+
+
+def _fetch_sector_minute_kline(session: requests.Session, name_code_map: Dict[str, str], sector_name: str) -> pd.DataFrame:
+    if sector_name not in name_code_map:
+        return pd.DataFrame(columns=_KLINE_COLUMNS)
+    code = name_code_map[sector_name]
+    url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
+    params = {
+        "secid": f"90.{code}",
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+        "lmt": "0",
+        "klt": "1",
+        "ut": "b2884a393a59ad64002292a3e90d46a5",
+    }
+    resp = session.get(url, params=params, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()["data"]["klines"]
+    if not data:
+        return pd.DataFrame(columns=_KLINE_COLUMNS)
+    rows = [line.split(",") for line in data]
+    df = pd.DataFrame(rows, columns=_KLINE_COLUMNS[: len(rows[0])])
+    df = df[_KLINE_COLUMNS]
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    for col in _KLINE_COLUMNS[1:]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def _load_top_sector_minute_klines(snapshot: FundFlowSnapshot, top_n: int = 12) -> Dict[str, pd.DataFrame]:
+    session = _get_session()
+    names = [row["name"] for row in snapshot.rows[:top_n]]
+    result: Dict[str, pd.DataFrame] = {}
+
+    def _load(name: str) -> tuple[str, pd.DataFrame]:
+        return name, _fetch_sector_minute_kline(session, snapshot.name_code_map, name)
+
+    with ThreadPoolExecutor(max_workers=min(max(len(names), 1), 12)) as executor:
+        futures = [executor.submit(_load, name) for name in names]
+        for future in as_completed(futures):
+            name, df = future.result()
+            result[name] = df
+
+    return result
+
+
+def _build_trend_frame(klines: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    frames: List[pd.DataFrame] = []
+    for name, df in klines.items():
+        if df.empty:
+            continue
+        temp = df[["timestamp", "main_net_inflow"]].copy()
+        temp = temp.rename(columns={"timestamp": "时间", "main_net_inflow": "主力净流入"})
+        temp["板块"] = name
+        frames.append(temp[["板块", "时间", "主力净流入"]])
+    if not frames:
+        return pd.DataFrame(columns=["板块", "时间", "主力净流入"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def _pick_default_top_names(rows: List[Dict[str, Any]], top_n: int = 12) -> List[str]:
+    return [row["name"] for row in rows[:top_n] if "name" in row]
+
+
+def _filter_rows(rows: List[Dict[str, Any]], names: List[str]) -> List[Dict[str, Any]]:
+    if not names:
+        return rows
+    name_set = set(names)
+    return [row for row in rows if row.get("name") in name_set]
+
+
+def _render_metric_row(snapshot: FundFlowSnapshot, used_kline_rows: int) -> None:
+    if not snapshot.rows:
+        return
+    latest_ts = snapshot.trade_date
+    st.metric(
+        "数据更新时间",
+        value=latest_ts.strftime("%Y-%m-%d %H:%M"),
+        help="东方财富板块资金流接口返回的最新时间戳；盘后通常为当日收盘时间。",
+    )
+    st.caption(f"分时明细已加载 {used_kline_rows} 条（前 {min(len(snapshot.rows), 12)} 个板块并行拉取）。")
+
+
+def _plot_sector_trend(df: pd.DataFrame) -> go.Figure:
+    if df.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            title="暂无当日分时资金流曲线",
+            annotations=[{"text": "盘前/数据缺失时显示此提示", "showarrow": False}],
+            margin=dict(l=16, r=16, t=40, b=16),
+        )
+        return fig
+    fig = px.line(
+        df,
+        x="时间",
+        y="主力净流入",
+        color="板块",
+        markers=False,
+        color_discrete_sequence=px.colors.qualitative.D3,
+    )
+    fig.update_traces(hovertemplate="板块: %{legendgroup}<br>时间: %{x|%H:%M}<br>主力净流入: %{y:,.0f}<extra></extra>")
+    fig.update_layout(
+        title="A股实时板块资金流向（主力净流入）",
+        xaxis_title="交易时间",
+        yaxis_title="累计主力净流入（元）",
+        legend_title="板块",
+        legend=dict(font=dict(size=11)),
+        hovermode="x unified",
+        margin=dict(l=16, r=16, t=44, b=16),
+        height=560,
+    )
+    return fig
+
+
+def _render_rank_table(snapshot: FundFlowSnapshot, selected_names: List[str]) -> None:
+    filtered = _filter_rows(snapshot.rows, selected_names) if selected_names else snapshot.rows
+    if not filtered:
+        st.info("当前未检索到板块资金流向数据。")
+        return
+    display_df = pd.DataFrame(filtered).copy()
+    rename = {
+        "rank": "序号",
+        "name": "板块",
+        "change_pct": "涨跌幅(%)",
+        "main_net_inflow": "主力净流入(元)",
+        "main_net_ratio": "主力净占比(%)",
+        "super_large_net_inflow": "超大单(元)",
+        "super_large_net_ratio": "超大单占比(%)",
+        "large_net_inflow": "大单(元)",
+        "large_net_ratio": "大单占比(%)",
+        "medium_net_inflow": "中单(元)",
+        "medium_net_ratio": "中单占比(%)",
+        "small_net_inflow": "小单(元)",
+        "small_net_ratio": "小单占比(%)",
+        "top_stock_name": "领涨/领跌股",
+    }
+    display_df = display_df.rename(columns={k: v for k, v in rename.items() if k in display_df.columns})
+    st.dataframe(display_df, width="stretch", hide_index=True)
+
+
+def render_fund_flow_page() -> None:
+    st.title("实时板块资金流向")
+    st.caption("数据来源：东方财富数据中心；分时曲线基于板块分钟级资金流明细，排行表支持今日/5日/10日口径。")
+
+    with st.sidebar:
+        st.subheader("筛选条件")
+        sector_type = st.selectbox(
+            "板块类型",
+            options=["industry", "concept", "region"],
+            index=0,
+            format_func=lambda x: {"industry": "行业板块", "concept": "概念板块", "region": "地域板块"}[x],
+        )
+        indicator = st.selectbox(
+            "统计周期",
+            options=["today", "5day", "10day"],
+            index=0,
+            format_func=lambda x: {"today": "今日净流入", "5day": "5日累计净流入", "10day": "10日累计净流入"}[x],
+        )
+        top_n = st.slider("分时曲线展示前 N 个板块", min_value=3, max_value=30, value=12, step=1)
+        refresh_seconds = st.number_input("自动刷新间隔（秒）", min_value=5, max_value=120, value=15, step=5)
+
+    now = _now_shanghai()
+    refresh_interval = max(int(refresh_seconds), _refresh_interval_seconds(now))
+    st_autorefresh = __import__("streamlit_autorefresh", fromlist=["st_autorefresh"]).st_autorefresh
+    st_autorefresh(interval=refresh_interval * 1000, key="fund_flow_autorefresh")
+
+    snapshot = _load_rank_snapshot(sector_type, indicator)
+    default_names = _pick_default_top_names(snapshot.rows, top_n)
+    selected_names = st.multiselect(
+        "选择要对比的板块（默认展示净流入前 12 个）",
+        options=[row["name"] for row in snapshot.rows],
+        default=default_names,
+    )
+
+    klines = _load_top_sector_minute_klines(snapshot, top_n=top_n)
+    trend_df = _build_trend_frame(klines)
+    used_kline_rows = int(trend_df.shape[0])
+    _render_metric_row(snapshot, used_kline_rows)
+
+    fig = _plot_sector_trend(trend_df)
+    st.plotly_chart(fig, width="stretch")
+
+    tab_rank, tab_detail = st.tabs(["板块排行", "说明与口径"])
+    with tab_rank:
+        _render_rank_table(snapshot, selected_names)
+    with tab_detail:
+        st.markdown(
+            """
+**页面逻辑说明**
+
+1. 左侧支持切换行业/概念/地域板块，以及今日、5日、10日三种口径。
+2. 分时曲线直接拉取前 N 个板块的**分钟级资金流明细**，用于还原日内净流入变化。
+3. 右侧排行表默认展示完整排名，可用于浏览全部板块净流入情况。
+4. 盘中自动刷新，非交易时段降频，避免无效请求。
+
+**数据口径**
+
+- 主力净流入 = 超大单 + 大单净流入额（分钟级明细与汇总口径一致）。
+- 领涨/领跌股字段来自东方财富板块资金流排名接口原始返回。
+- 数据更新时间取自接口返回的最新时间戳，不一定等于页面刷新时间。
+"""
+        )
+
+    logger.debug(
+        "fund_flow_render sector_type=%s indicator=%s top_n=%s rows=%s kline_rows=%s",
+        sector_type,
+        indicator,
+        top_n,
+        len(snapshot.rows),
+        used_kline_rows,
+    )
+

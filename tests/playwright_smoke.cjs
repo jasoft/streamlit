@@ -74,6 +74,9 @@ async function run() {
     await openSidebarPage(page, "创业板成交占比", ["最新创业板成交占比", "创业板成交占比数据获取失败"], 180000);
     checks.push({ page: "创业板成交占比", ok: true, marker: "最新创业板成交占比 / 数据获取失败提示" });
 
+    await openSidebarPage(page, "实时板块资金流向", ["实时板块资金流向", "主力净流入"], 180000);
+    checks.push({ page: "实时板块资金流向", ok: true, marker: "实时板块资金流向 / 主力净流入" });
+
     await openSidebarPage(page, "使用说明", "统一入口", 60000);
     checks.push({ page: "使用说明", ok: true, marker: "统一入口" });
 

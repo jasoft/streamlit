@@ -29,6 +29,7 @@ def main() -> None:
             "沪深300行业权重",
             "市场拥挤度",
             "创业板成交占比",
+            "实时板块资金流向",
             "使用说明",
         ],
         index=0,
@@ -59,6 +60,10 @@ def main() -> None:
         from stockview.hs300_industry import render_hs300_industry_page
 
         render_hs300_industry_page()
+    elif page == "实时板块资金流向":
+        from stockview.fund_flow import render_fund_flow_page
+
+        render_fund_flow_page()
     elif page == "市场拥挤度":
         from stockview.congestion import render_congestion_page
 
@@ -78,6 +83,7 @@ def main() -> None:
             - 沪深300行业权重: 按中证成分权重和问财行业归属聚合行业占比
             - 市场拥挤度: 抓取乐咕乐股拥挤度页面并画双轴图
             - 创业板成交占比: 观察创业板占沪深总成交额比例
+            - 实时板块资金流向: 行业/概念/地域资金流分时曲线、排行看板、自动刷新
             - 脚本入口: `./.venv/bin/python scripts/if_im_style_analysis.py`
             """
         )
