@@ -376,7 +376,8 @@ def _build_trend_frame(klines: Dict[str, pd.DataFrame]) -> pd.DataFrame:
             continue
         temp = df[["timestamp", "main_net_inflow"]].copy()
         temp = temp[temp["timestamp"].apply(_is_trading_minute)]
-        temp = temp.rename(columns={"timestamp": "时间", "main_net_inflow": "主力净流入"})
+        temp["时间"] = temp["timestamp"].dt.strftime("%H:%M")
+        temp = temp.rename(columns={"main_net_inflow": "主力净流入"})
         temp["板块"] = name
         frames.append(temp[["板块", "时间", "主力净流入"]])
     if not frames:
@@ -460,7 +461,7 @@ def _plot_sector_trend(df: pd.DataFrame, name_annotation: str = "end") -> go.Fig
         markers=False,
         color_discrete_map=color_map,
     )
-    fig.update_traces(hovertemplate="板块: %{legendgroup}<br>时间: %{x|%H:%M}<br>主力净流入: %{y:,.0f}<extra></extra>")
+    fig.update_traces(hovertemplate="板块: %{legendgroup}<br>时间: %{x}<br>主力净流入: %{y:,.0f}<extra></extra>")
 
     # 在每条线末端直接标注板块名称，减少颜色反复对照的困扰。
     if name_annotation == "end":
@@ -484,10 +485,8 @@ def _plot_sector_trend(df: pd.DataFrame, name_annotation: str = "end") -> go.Fig
         title="A股实时板块资金流向（主力净流入）",
         xaxis_title="交易时间",
         xaxis=dict(
-            rangebreaks=[
-                dict(bounds=[11.5, 13], pattern="hour"),
-                dict(bounds=[15, 9.5], pattern="hour"),
-            ]
+            type="category",
+            nticks=15,
         ),
         yaxis_title="累计主力净流入（元）",
         legend_title="板块",

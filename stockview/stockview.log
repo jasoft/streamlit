@@ -26,3 +26,16 @@ Name: 4, dtype: float64
 2025-02-19 10:35:28,075 - INFO - 2025-02-19 �ǽ�����
 2025-02-19 10:35:28,142 - INFO - ��ͣ���Ʊ����: 53
 2025-02-19 10:35:28,207 - INFO - ��ͣ���Ʊ����: 2
+2026-06-18 00:13:51,106 - INFO - 获取市场热度数据
+2026-06-18 00:13:51,711 - INFO - 获取最近 5 个交易日的平均成交额
+2026-06-18 00:14:07,091 - INFO - 获取市场热度数据
+2026-06-18 00:14:07,724 - INFO - 获取最近 5 个交易日的平均成交额
+2026-06-18 00:14:08,695 - INFO - 最近5日平均成交额: 31677亿 (基于新浪源历史数据)
+2026-06-18 00:16:48,127 - INFO - 获取市场热度数据
+2026-06-18 00:16:48,222 - INFO - 获取市场热度数据
+2026-06-18 00:16:54,923 - INFO - 获取市场热度数据
+2026-06-18 00:16:54,924 - INFO - 获取市场热度数据
+2026-06-27 12:10:57,199 - ERROR - Failed to parse update_time: to_datetime() got an unexpected keyword argument 'tz'
+2026-06-27 12:11:08,409 - ERROR - Failed to parse update_time: to_datetime() got an unexpected keyword argument 'tz'
+2026-06-27 12:11:20,059 - ERROR - Failed to parse update_time: to_datetime() got an unexpected keyword argument 'tz'
+2026-06-27 12:11:30,720 - ERROR - Failed to parse update_time: to_datetime() got an unexpected keyword argument 'tz'
