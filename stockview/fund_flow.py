@@ -4,7 +4,8 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Dict, List
+import hashlib
+from typing import Any, Dict, Iterable, List
 
 import pandas as pd
 import plotly.express as px
@@ -334,8 +335,15 @@ def _fetch_sector_minute_kline(session: requests.Session, name_code_map: Dict[st
 
 
 def _load_top_sector_minute_klines(snapshot: FundFlowSnapshot, top_n: int = 12) -> Dict[str, pd.DataFrame]:
+    """加载分钟资金流：取流入前 N + 流出后 N，尽量覆盖两段对比。"""
     session = _get_session()
-    names = [row["name"] for row in snapshot.rows[:top_n]]
+    names: List[str] = []
+    seen: set[str] = set()
+    for row in snapshot.rows[:top_n] + snapshot.rows[-top_n:]:
+        name = row.get("name")
+        if name and name not in seen:
+            names.append(name)
+            seen.add(name)
     result: Dict[str, pd.DataFrame] = {}
 
     def _load(name: str) -> tuple[str, pd.DataFrame]:
@@ -350,12 +358,21 @@ def _load_top_sector_minute_klines(snapshot: FundFlowSnapshot, top_n: int = 12) 
     return result
 
 
+def _is_trading_minute(ts: pd.Timestamp) -> bool:
+    if pd.isna(ts):
+        return False
+    t = ts.time()
+    return any(start <= t <= end for start, end in _TRADING_WINDOWS)
+
+
 def _build_trend_frame(klines: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """构建趋势 DataFrame，并过滤午休/盘前盘后空点，避免水平直线误导。"""
     frames: List[pd.DataFrame] = []
     for name, df in klines.items():
         if df.empty:
             continue
         temp = df[["timestamp", "main_net_inflow"]].copy()
+        temp = temp[temp["timestamp"].apply(_is_trading_minute)]
         temp = temp.rename(columns={"timestamp": "时间", "main_net_inflow": "主力净流入"})
         temp["板块"] = name
         frames.append(temp[["板块", "时间", "主力净流入"]])
@@ -365,7 +382,15 @@ def _build_trend_frame(klines: Dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def _pick_default_top_names(rows: List[Dict[str, Any]], top_n: int = 12) -> List[str]:
-    return [row["name"] for row in rows[:top_n] if "name" in row]
+    """默认选取：流入前 N + 流出后 N，不重复。"""
+    names: List[str] = []
+    seen: set[str] = set()
+    for row in rows[:top_n] + rows[-top_n:]:
+        name = row.get("name")
+        if name and name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
 
 
 def _filter_rows(rows: List[Dict[str, Any]], names: List[str]) -> List[Dict[str, Any]]:
@@ -375,7 +400,7 @@ def _filter_rows(rows: List[Dict[str, Any]], names: List[str]) -> List[Dict[str,
     return [row for row in rows if row.get("name") in name_set]
 
 
-def _render_metric_row(snapshot: FundFlowSnapshot, used_kline_rows: int) -> None:
+def _render_metric_row(snapshot: FundFlowSnapshot, used_kline_rows: int, top_n: int = 12) -> None:
     if not snapshot.rows:
         return
     latest_ts = snapshot.trade_date
@@ -384,7 +409,10 @@ def _render_metric_row(snapshot: FundFlowSnapshot, used_kline_rows: int) -> None
         value=latest_ts.strftime("%Y-%m-%d %H:%M"),
         help="东方财富板块资金流接口返回的最新时间戳；盘后通常为当日收盘时间。",
     )
-    st.caption(f"分时明细已加载 {used_kline_rows} 条（前 {min(len(snapshot.rows), 12)} 个板块并行拉取）。")
+    selected_display = min(len(snapshot.rows), top_n) if top_n else 12
+    st.caption(
+        f"分时明细已加载 {used_kline_rows} 条（流入前 {selected_display} + 流出后 {selected_display} 个板块并行拉取）。"
+    )
 
 
 def _build_sector_color_map(names: Iterable[str]) -> Dict[str, str]:
@@ -410,7 +438,7 @@ def _build_sector_color_map(names: Iterable[str]) -> Dict[str, str]:
     return mapping
 
 
-def _plot_sector_trend(df: pd.DataFrame) -> go.Figure:
+def _plot_sector_trend(df: pd.DataFrame, name_annotation: str = "end") -> go.Figure:
     if df.empty:
         fig = go.Figure()
         fig.update_layout(
@@ -430,6 +458,25 @@ def _plot_sector_trend(df: pd.DataFrame) -> go.Figure:
         color_discrete_map=color_map,
     )
     fig.update_traces(hovertemplate="板块: %{legendgroup}<br>时间: %{x|%H:%M}<br>主力净流入: %{y:,.0f}<extra></extra>")
+
+    # 在每条线末端直接标注板块名称，减少颜色反复对照的困扰。
+    if name_annotation == "end":
+        for trace in fig.data:
+            if not len(trace.x):
+                continue
+            last_x = trace.x[-1]
+            last_y = trace.y[-1]
+            fig.add_annotation(
+                x=last_x,
+                y=last_y,
+                text=trace.name,
+                showarrow=False,
+                xanchor="left",
+                yanchor="middle",
+                font=dict(size=11),
+                xshift=6,
+            )
+
     fig.update_layout(
         title="A股实时板块资金流向（主力净流入）",
         xaxis_title="交易时间",
@@ -437,7 +484,7 @@ def _plot_sector_trend(df: pd.DataFrame) -> go.Figure:
         legend_title="板块",
         legend=dict(font=dict(size=11)),
         hovermode="x unified",
-        margin=dict(l=16, r=16, t=44, b=16),
+        margin=dict(l=16, r=16, t=44, b=16 + 120),
         height=560,
     )
     return fig
@@ -503,12 +550,12 @@ def render_fund_flow_page() -> None:
         default=default_names,
     )
 
-    klines = _load_top_sector_minute_klines(snapshot, top_n=top_n)
+    klines = _load_top_sector_minute_klines(snapshot, top_n=int(top_n))
     trend_df = _build_trend_frame(klines)
     used_kline_rows = int(trend_df.shape[0])
-    _render_metric_row(snapshot, used_kline_rows)
+    _render_metric_row(snapshot, used_kline_rows, top_n=int(top_n))
 
-    fig = _plot_sector_trend(trend_df)
+    fig = _plot_sector_trend(trend_df, name_annotation="end")
     st.plotly_chart(fig, use_container_width=True)
 
     tab_rank, tab_detail = st.tabs(["板块排行", "说明与口径"])

@@ -44,8 +44,12 @@ class TestHelperFunctions(unittest.TestCase):
         self.assertEqual(_refresh_interval_seconds(pd.Timestamp("2026-06-27 10:00:00", tz="Asia/Shanghai")), 8)
         self.assertEqual(_refresh_interval_seconds(pd.Timestamp("2026-06-27 18:00:00", tz="Asia/Shanghai")), 45)
 
-    def test_pick_default_top_names(self) -> None:
-        self.assertEqual(_pick_default_top_names([{"name": "A"}, {"name": "B"}, {"name": "C"}], top_n=2), ["A", "B"])
+    def test_pick_default_top_names_two_segments(self) -> None:
+        rows = [{"name": n} for n in ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]]
+        self.assertEqual(
+            _pick_default_top_names(rows, top_n=2),
+            ["Alpha", "Beta", "Delta", "Epsilon"],
+        )
         self.assertEqual(_pick_default_top_names([], top_n=5), [])
 
     def test_filter_rows(self) -> None:
