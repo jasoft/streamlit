@@ -61,6 +61,7 @@ _TODAY_COLUMNS = [
     "small_net_ratio",
     "top_stock_name",
     "top_stock_code",
+    "update_time",
 ]
 
 _MULTI_DAY_COLUMNS = [
@@ -77,6 +78,7 @@ _MULTI_DAY_COLUMNS = [
     "small_net_inflow",
     "small_net_ratio",
     "top_stock_name",
+    "update_time",
 ]
 
 _KLINE_COLUMNS = [
@@ -240,6 +242,7 @@ def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
             "f87": "small_net_ratio",
             "f204": "top_stock_name",
             "f205": "top_stock_code",
+            "f124": "update_time",
         }
         columns = _TODAY_COLUMNS
     elif indicator == "5day":
@@ -259,6 +262,7 @@ def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
             "f173": "small_net_ratio",
             "f257": "top_stock_name",
             "f258": "top_stock_code",
+            "f124": "update_time",
         }
         columns = _MULTI_DAY_COLUMNS
     else:
@@ -278,6 +282,7 @@ def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
             "f183": "small_net_ratio",
             "f260": "top_stock_name",
             "f261": "top_stock_code",
+            "f124": "update_time",
         }
         columns = _MULTI_DAY_COLUMNS
 
@@ -291,10 +296,11 @@ def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
 
     latest_ts = _now_shanghai()
     try:
-        if not df.empty and "_code" in df.columns:
-            ts_raw = int(df.iloc[0]["_code"][:10])
+        if not df.empty and "update_time" in df.columns:
+            ts_raw = int(df.iloc[0]["update_time"])
             latest_ts = pd.to_datetime(ts_raw, unit="s", tz="Asia/Shanghai")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.error("Failed to parse update_time: %s", e)
         latest_ts = _now_shanghai()
 
     return FundFlowSnapshot(
@@ -334,23 +340,16 @@ def _fetch_sector_minute_kline(session: requests.Session, name_code_map: Dict[st
     return df
 
 
-def _load_top_sector_minute_klines(snapshot: FundFlowSnapshot, top_n: int = 12) -> Dict[str, pd.DataFrame]:
-    """加载分钟资金流：取流入前 N + 流出后 N，尽量覆盖两段对比。"""
+def _load_selected_sector_minute_klines(snapshot: FundFlowSnapshot, names: List[str]) -> Dict[str, pd.DataFrame]:
+    """加载指定板块的分钟资金流。"""
     session = _get_session()
-    names: List[str] = []
-    seen: set[str] = set()
-    for row in snapshot.rows[:top_n] + snapshot.rows[-top_n:]:
-        name = row.get("name")
-        if name and name not in seen:
-            names.append(name)
-            seen.add(name)
     result: Dict[str, pd.DataFrame] = {}
 
     def _load(name: str) -> tuple[str, pd.DataFrame]:
         return name, _fetch_sector_minute_kline(session, snapshot.name_code_map, name)
 
     with ThreadPoolExecutor(max_workers=min(max(len(names), 1), 12)) as executor:
-        futures = [executor.submit(_load, name) for name in names]
+        futures = [executor.submit(_load, name) for name in set(names)]
         for future in as_completed(futures):
             name, df = future.result()
             result[name] = df
@@ -545,12 +544,12 @@ def render_fund_flow_page() -> None:
     snapshot = _load_rank_snapshot(sector_type, indicator)
     default_names = _pick_default_top_names(snapshot.rows, top_n)
     selected_names = st.multiselect(
-        "选择要对比的板块（默认展示净流入前 12 个）",
+        f"选择要对比的板块（默认展示净流入前 {top_n} 个与后 {top_n} 个）",
         options=[row["name"] for row in snapshot.rows],
         default=default_names,
     )
 
-    klines = _load_top_sector_minute_klines(snapshot, top_n=int(top_n))
+    klines = _load_selected_sector_minute_klines(snapshot, selected_names)
     trend_df = _build_trend_frame(klines)
     used_kline_rows = int(trend_df.shape[0])
     _render_metric_row(snapshot, used_kline_rows, top_n=int(top_n))
