@@ -461,7 +461,7 @@ def _plot_sector_trend(df: pd.DataFrame, name_annotation: str = "end") -> go.Fig
         markers=False,
         color_discrete_map=color_map,
     )
-    fig.update_traces(hovertemplate="板块: %{legendgroup}<br>时间: %{x}<br>主力净流入: %{y:,.0f}<extra></extra>")
+    fig.update_traces(hovertemplate="%{y:,.0f}<extra></extra>")
 
     # 在每条线末端直接标注板块名称，减少颜色反复对照的困扰。
     if name_annotation == "end":
