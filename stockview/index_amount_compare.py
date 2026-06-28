@@ -55,11 +55,25 @@ def build_index_amount_dataframe(days: int = 365) -> pd.DataFrame:
     return df
 
 
+from stockview.state import init_slider_state, on_slider_change
+
+
 def render_index_amount_compare_page() -> None:
     st.title("指数成交额风格对比")
     st.caption("观察中证1000/2000在总成交额中的占比，以及相对沪深300的日收益表现。")
 
-    lookback_days = st.slider("回看天数", min_value=120, max_value=730, value=365, step=10)
+    slider_key = "index_compare_lookback_days"
+    init_val = init_slider_state(slider_key, default_value=365, min_value=120, max_value=730)
+    lookback_days = st.slider(
+        "回看天数",
+        min_value=120,
+        max_value=730,
+        value=init_val,
+        step=10,
+        key=slider_key,
+        on_change=on_slider_change,
+        args=(slider_key,),
+    )
 
     try:
         df = build_index_amount_dataframe(lookback_days)

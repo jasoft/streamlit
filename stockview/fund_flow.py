@@ -16,6 +16,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from stockview.log import logger
+from stockview.state import init_slider_state, on_slider_change
 
 _EM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -553,16 +554,34 @@ def render_fund_flow_page() -> None:
         max_val_yi = float(math.ceil(max_val_yuan / 1e8))
         max_slider_val = max(max_val_yi, 1.0)
         
+        # 过滤不活跃板块滑块
+        min_flow_key = "fund_flow_min_flow"
+        init_min_flow = init_slider_state(min_flow_key, default_value=0.0, min_value=0.0, max_value=max_slider_val)
         min_flow = st.slider(
             "过滤不活跃板块 (绝对值 ≥ N 亿元)",
             min_value=0.0,
             max_value=max_slider_val,
-            value=0.0,
+            value=init_min_flow,
             step=0.5 if max_slider_val <= 50.0 else 1.0,
+            key=min_flow_key,
+            on_change=on_slider_change,
+            args=(min_flow_key,),
             help="仅展示累计主力净流入/流出绝对值大于或等于该设定值的板块",
         )
         
-        top_n = st.slider("分时曲线展示前 N 个板块", min_value=3, max_value=30, value=12, step=1)
+        # Top N 个板块滑块
+        top_n_key = "fund_flow_top_n"
+        init_top_n = init_slider_state(top_n_key, default_value=12, min_value=3, max_value=30)
+        top_n = st.slider(
+            "分时曲线展示前 N 个板块",
+            min_value=3,
+            max_value=30,
+            value=init_top_n,
+            step=1,
+            key=top_n_key,
+            on_change=on_slider_change,
+            args=(top_n_key,),
+        )
         refresh_seconds = st.number_input("自动刷新间隔（秒）", min_value=5, max_value=120, value=15, step=5)
 
     now = _now_shanghai()

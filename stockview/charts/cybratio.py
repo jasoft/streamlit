@@ -51,11 +51,25 @@ def build_cyb_ratio_dataframe(lookback_days: int = 250) -> pd.DataFrame:
     return df_result
 
 
+from stockview.state import init_slider_state, on_slider_change
+
+
 def render_cyb_ratio_page() -> None:
     st.title("创业板成交占比")
     st.caption("用创业板成交额占沪深总成交额的比重，观察小盘成长情绪与大盘位置。")
 
-    lookback_days = st.slider("回看交易日", min_value=60, max_value=500, value=250, step=10)
+    slider_key = "cyb_ratio_lookback_days"
+    init_val = init_slider_state(slider_key, default_value=250, min_value=60, max_value=500)
+    lookback_days = st.slider(
+        "回看交易日",
+        min_value=60,
+        max_value=500,
+        value=init_val,
+        step=10,
+        key=slider_key,
+        on_change=on_slider_change,
+        args=(slider_key,),
+    )
     try:
         df_result = build_cyb_ratio_dataframe(lookback_days)
     except Exception as exc:
