@@ -379,9 +379,10 @@ def _build_trend_frame(klines: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         temp["时间"] = temp["timestamp"].dt.strftime("%H:%M")
         temp["主力净流入"] = temp["main_net_inflow"] / 1e8
         temp["板块"] = name
-        frames.append(temp[["板块", "时间", "主力净流入"]])
+        temp["红绿"] = temp["主力净流入"].apply(lambda x: "🔴" if x >= 0 else "🟢")
+        frames.append(temp[["板块", "时间", "主力净流入", "红绿"]])
     if not frames:
-        return pd.DataFrame(columns=["板块", "时间", "主力净流入"])
+        return pd.DataFrame(columns=["板块", "时间", "主力净流入", "红绿"])
     return pd.concat(frames, ignore_index=True)
 
 
@@ -460,8 +461,11 @@ def _plot_sector_trend(df: pd.DataFrame, name_annotation: str = "end") -> go.Fig
         color="板块",
         markers=False,
         color_discrete_map=color_map,
+        custom_data=["板块", "红绿"],
     )
-    fig.update_traces(hovertemplate="%{y:.2f} 亿<extra></extra>")
+    fig.update_traces(
+        hovertemplate="<b>%{customdata[0]}</b>: %{customdata[1]} %{y:.2f} 亿<extra></extra>"
+    )
 
     # 在每条线末端直接标注板块名称，减少颜色反复对照的困扰。
     if name_annotation == "end":
@@ -491,7 +495,7 @@ def _plot_sector_trend(df: pd.DataFrame, name_annotation: str = "end") -> go.Fig
         yaxis_title="累计主力净流入（亿元）",
         legend_title="板块",
         legend=dict(font=dict(size=11)),
-        hovermode="x unified",
+        hovermode="closest",
         margin=dict(l=16, r=16, t=44, b=16 + 120),
         height=800,
     )
