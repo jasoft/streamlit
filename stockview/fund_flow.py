@@ -545,6 +545,23 @@ def render_fund_flow_page() -> None:
             index=0,
             format_func=lambda x: {"today": "今日净流入", "5day": "5日累计净流入", "10day": "10日累计净流入"}[x],
         )
+        
+        snapshot = _load_rank_snapshot(sector_type, indicator)
+        
+        # 动态计算最大值，作为过滤滑动条的上限（亿元）
+        max_val_yuan = max([abs(row.get("main_net_inflow", 0)) for row in snapshot.rows]) if snapshot.rows else 0
+        max_val_yi = float(math.ceil(max_val_yuan / 1e8))
+        max_slider_val = max(max_val_yi, 1.0)
+        
+        min_flow = st.slider(
+            "过滤不活跃板块 (绝对值 ≥ N 亿元)",
+            min_value=0.0,
+            max_value=max_slider_val,
+            value=0.0,
+            step=0.5 if max_slider_val <= 50.0 else 1.0,
+            help="仅展示累计主力净流入/流出绝对值大于或等于该设定值的板块",
+        )
+        
         top_n = st.slider("分时曲线展示前 N 个板块", min_value=3, max_value=30, value=12, step=1)
         refresh_seconds = st.number_input("自动刷新间隔（秒）", min_value=5, max_value=120, value=15, step=5)
 
@@ -553,11 +570,18 @@ def render_fund_flow_page() -> None:
     st_autorefresh = __import__("streamlit_autorefresh", fromlist=["st_autorefresh"]).st_autorefresh
     st_autorefresh(interval=refresh_interval * 1000, key="fund_flow_autorefresh")
 
-    snapshot = _load_rank_snapshot(sector_type, indicator)
-    default_names = _pick_default_top_names(snapshot.rows, top_n)
+    # 根据过滤阈值筛选板块
+    threshold_yuan = min_flow * 1e8
+    filtered_rows = [row for row in snapshot.rows if abs(row.get("main_net_inflow", 0)) >= threshold_yuan]
+    
+    if not filtered_rows:
+        st.warning(f"当前过滤阈值过高，无累计主力净流入/流出绝对值 ≥ {min_flow} 亿元的板块，请调低过滤条件。")
+        st.stop()
+        
+    default_names = _pick_default_top_names(filtered_rows, top_n)
     selected_names = st.multiselect(
         f"选择要对比的板块（默认展示净流入前 {top_n} 个与后 {top_n} 个）",
-        options=[row["name"] for row in snapshot.rows],
+        options=[row["name"] for row in filtered_rows],
         default=default_names,
     )
 
