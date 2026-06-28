@@ -647,6 +647,8 @@ def streamlit_app():
                     st.metric("预估成交额", f"{pred_amount:,}亿",
                               delta=f"{delta_vs_avg:+,}亿 vs 5日均值",
                               delta_color="normal" if delta_vs_avg > 0 else "inverse")
+                else:
+                    st.metric("预估成交额", "休市", delta="非交易日", delta_color="off")
 
             with metrics_col2:
                 st.metric("上涨占比", f"{data['数值'][14]:.1f}%")
