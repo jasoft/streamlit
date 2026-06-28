@@ -18,7 +18,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 IWENCAI_SCRIPT = PROJECT_ROOT / "skills" / "financial-data" / "scripts" / "cli_index.py"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "hs300_industry_weight"
-DEFAULT_QUERY = "沪深300成分股 所属同花顺一级行业 总市值"
+DEFAULT_QUERY = "沪深300成分股 所属同花顺一级行业 A股总市值"
 
 
 @dataclass(frozen=True)
@@ -128,7 +128,11 @@ def calculate_industry_weights(
     missing = merged[merged["所属同花顺一级行业"].isna()][["成分券代码", "成分券名称", "权重"]]
     if not missing.empty:
         names = ", ".join(missing["成分券名称"].astype(str).head(10))
-        raise RuntimeError(f"有 {len(missing)} 只成分股未匹配行业: {names}")
+        sys.stderr.write(f"Warning: 有 {len(missing)} 只成分股未匹配行业: {names}\n")
+    
+    # 将未匹配的行业和市值填充为默认值，防止后续统计和画图出错
+    merged["所属同花顺一级行业"] = merged["所属同花顺一级行业"].fillna("其他/未匹配")
+    merged["总市值"] = merged["总市值"].fillna(0)
 
     summary = (
         merged.groupby("所属同花顺一级行业", dropna=False)
