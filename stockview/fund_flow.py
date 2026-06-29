@@ -148,174 +148,335 @@ class FundFlowTrendPoint:
     large_net_inflow: float
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _get_sector_code_name_map(sector_type: str) -> Dict[str, str]:
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "fid": "f62",
-        "po": "1",
-        "pz": "500",
-        "pn": "1",
-        "np": "1",
-        "fltt": "2",
-        "invt": "2",
-        "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
-        "fs": _SECTOR_FS[sector_type],
-        "fields": "f12,f14,f3,f62,f1,f13",
-    }
+def _get_sector_code_name_map_sina(sector_type: str) -> Dict[str, str]:
+    fenlei = "0" if sector_type == "industry" else "1"
+    url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_bk?page=1&num=100&sort=netamount&asc=0&fenlei={fenlei}"
     session = _get_session()
-    resp = session.get(url, params=params, timeout=20)
+    resp = session.get(url, headers={"Referer": "http://vip.stock.finance.sina.com.cn/"}, timeout=15)
     resp.raise_for_status()
-    data = resp.json()["data"]
-    total_page = math.ceil(data["total"] / 500)
-    rows: List[Dict[str, Any]] = []
-    for page in range(1, total_page + 1):
-        params.update({"pn": page})
-        if page != 1:
-            resp = session.get(url, params=params, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()["data"]
-        rows.extend(data["diff"])
-    name_code_map = {row["f14"]: row["f12"] for row in rows if "f14" in row and "f12" in row}
+    sectors = resp.json()
+    name_code_map = {item['name']: item['category'] for item in sectors}
     return name_code_map
 
 
-def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    fields_map = {
-        "today": "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124",
-        "5day": "f12,f14,f2,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f257,f258,f124",
-        "10day": "f12,f14,f2,f160,f174,f175,f176,f177,f178,f179,f180,f181,f182,f183,f260,f261,f124",
-    }
-    params = {
-        "pn": "1",
-        "pz": "500",
-        "po": "1",
-        "np": "1",
-        "ut": "b2884a393a59ad64002292a3e90d46a5",
-        "fltt": "2",
-        "invt": "2",
-        "fid0": _INDICATOR_TO_FIELD[indicator],
-        "fs": _SECTOR_FS[sector_type],
-        "stat": _INDICATOR_TO_STAT[indicator],
-        "fields": fields_map[indicator],
-        "rt": "52975239",
-        "_": int(time.time() * 1000),
-    }
-    session = _get_session()
-    resp = session.get(url, params=params, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()["data"]
-    total_page = math.ceil(data["total"] / 500) if data.get("total") else 0
-    frames: List[pd.DataFrame] = []
-    for page in range(1, total_page + 1):
-        params.update({"pn": page})
-        if page != 1:
-            resp = session.get(url, params=params, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()["data"]
-        frames.append(pd.DataFrame(data["diff"]))
-    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if df.empty:
-        return FundFlowSnapshot(
-            trade_date=_now_shanghai(),
-            rows=[],
-            code_name_map={},
-            name_code_map={},
-            source_type="sector",
-            indicator=indicator,
-        )
-
-
-    if indicator == "today":
-        rename_map = {
-            "f12": "_code",
-            "f14": "name",
-            "f3": "change_pct",
-            "f62": "main_net_inflow",
-            "f184": "main_net_ratio",
-            "f66": "super_large_net_inflow",
-            "f69": "super_large_net_ratio",
-            "f72": "large_net_inflow",
-            "f75": "large_net_ratio",
-            "f78": "medium_net_inflow",
-            "f81": "medium_net_ratio",
-            "f84": "small_net_inflow",
-            "f87": "small_net_ratio",
-            "f204": "top_stock_name",
-            "f205": "top_stock_code",
-            "f124": "update_time",
-        }
-        columns = _TODAY_COLUMNS
-    elif indicator == "5day":
-        rename_map = {
-            "f12": "_code",
-            "f14": "name",
-            "f109": "change_pct",
-            "f164": "main_net_inflow",
-            "f165": "main_net_ratio",
-            "f166": "super_large_net_inflow",
-            "f167": "super_large_net_ratio",
-            "f168": "large_net_inflow",
-            "f169": "large_net_ratio",
-            "f170": "medium_net_inflow",
-            "f171": "medium_net_ratio",
-            "f172": "small_net_inflow",
-            "f173": "small_net_ratio",
-            "f257": "top_stock_name",
-            "f258": "top_stock_code",
-            "f124": "update_time",
-        }
-        columns = _MULTI_DAY_COLUMNS
-    else:
-        rename_map = {
-            "f12": "_code",
-            "f14": "name",
-            "f160": "change_pct",
-            "f174": "main_net_inflow",
-            "f175": "main_net_ratio",
-            "f176": "super_large_net_inflow",
-            "f177": "super_large_net_ratio",
-            "f178": "large_net_inflow",
-            "f179": "large_net_ratio",
-            "f180": "medium_net_inflow",
-            "f181": "medium_net_ratio",
-            "f182": "small_net_inflow",
-            "f183": "small_net_ratio",
-            "f260": "top_stock_name",
-            "f261": "top_stock_code",
-            "f124": "update_time",
-        }
-        columns = _MULTI_DAY_COLUMNS
-
-    df = df.rename(columns=rename_map)
-    df = df[[col for col in columns if col in df.columns]]
-    numeric_cols = [col for col in df.columns if col not in {"name", "top_stock_name", "top_stock_code", "_code"}]
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.sort_values("main_net_inflow", ascending=False).reset_index(drop=True)
-    df.insert(0, "rank", range(1, len(df) + 1))
-
-    name_code_map = dict(zip(df["name"], df["_code"]))
-    code_name_map = {v: k for k, v in name_code_map.items()}
-
-    latest_ts = _now_shanghai()
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_sector_code_name_map(sector_type: str) -> Dict[str, str]:
     try:
-        if not df.empty and "update_time" in df.columns:
-            ts_raw = int(df.iloc[0]["update_time"])
-            latest_ts = pd.to_datetime(ts_raw, unit="s", utc=True).tz_convert("Asia/Shanghai")
-    except Exception as e:  # noqa: BLE001
-        logger.error("Failed to parse update_time: %s", e)
-        latest_ts = _now_shanghai()
+        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        params = {
+            "fid": "f62",
+            "po": "1",
+            "pz": "500",
+            "pn": "1",
+            "np": "1",
+            "fltt": "2",
+            "invt": "2",
+            "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
+            "fs": _SECTOR_FS[sector_type],
+            "fields": "f12,f14,f3,f62,f1,f13",
+        }
+        session = _get_session()
+        resp = session.get(url, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()["data"]
+        total_page = math.ceil(data["total"] / 500)
+        rows: List[Dict[str, Any]] = []
+        for page in range(1, total_page + 1):
+            params.update({"pn": page})
+            if page != 1:
+                resp = session.get(url, params=params, timeout=20)
+                resp.raise_for_status()
+                data = resp.json()["data"]
+            rows.extend(data["diff"])
+        name_code_map = {row["f14"]: row["f12"] for row in rows if "f14" in row and "f12" in row}
+        return name_code_map
+    except Exception as e:
+        logger.warning("Failed to get sector map from Eastmoney: %s. Falling back to Sina.", e)
+        try:
+            return _get_sector_code_name_map_sina(sector_type)
+        except Exception as ex:
+            logger.error("Sina map fallback failed: %s", ex)
+            return {}
 
+
+def _load_rank_snapshot_sina(sector_type: str, indicator: str) -> FundFlowSnapshot:
+    fenlei = "0" if sector_type == "industry" else "1"
+    url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_bk?page=1&num=100&sort=netamount&asc=0&fenlei={fenlei}"
+    session = _get_session()
+    resp = session.get(url, headers={"Referer": "http://vip.stock.finance.sina.com.cn/"}, timeout=15)
+    resp.raise_for_status()
+    sectors = resp.json()
+    
+    name_code_map = {item['name']: item['category'] for item in sectors}
+    code_name_map = {item['category']: item['name'] for item in sectors}
+    
+    rows = []
+    
+    if indicator == "today":
+        for item in sectors:
+            rows.append({
+                "name": item['name'],
+                "change_pct": float(item['avg_changeratio']) * 100,
+                "main_net_inflow": float(item['netamount']),
+                "main_net_ratio": float(item['ratioamount']) * 100,
+                "super_large_net_inflow": 0.0,
+                "super_large_net_ratio": 0.0,
+                "large_net_inflow": 0.0,
+                "large_net_ratio": 0.0,
+                "medium_net_inflow": 0.0,
+                "medium_net_ratio": 0.0,
+                "small_net_inflow": 0.0,
+                "small_net_ratio": 0.0,
+                "top_stock_name": item.get('ts_name', '-'),
+                "top_stock_code": item.get('ts_symbol', '-'),
+                "update_time": pd.Timestamp.now(tz="Asia/Shanghai").strftime("%H:%M:%S"),
+                "_code": item['category']
+            })
+    else:
+        days = 5 if indicator == "5day" else 10
+        categories = [item['category'] for item in sectors]
+        
+        def fetch_history(category):
+            h_url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_zjlrqs?bankuai={category}&page=1&num={days}&sort=opendate&asc=0"
+            try:
+                h_resp = session.get(h_url, headers={"Referer": "http://vip.stock.finance.sina.com.cn/"}, timeout=8)
+                h_resp.raise_for_status()
+                return category, h_resp.json()
+            except Exception as e:
+                logger.warning("Failed to fetch history for %s from Sina: %s", category, e)
+                return category, None
+                
+        with ThreadPoolExecutor(max_workers=15) as executor:
+            histories = dict(executor.map(fetch_history, categories))
+            
+        for item in sectors:
+            cat = item['category']
+            hist = histories.get(cat)
+            if not hist:
+                continue
+            
+            main_net_inflow = sum(float(day_data['netamount']) for day_data in hist)
+            change_pct = sum(float(day_data['avg_changeratio']) for day_data in hist) * 100
+            latest_day = hist[0]
+            
+            rows.append({
+                "name": item['name'],
+                "change_pct": change_pct,
+                "main_net_inflow": main_net_inflow,
+                "main_net_ratio": float(latest_day['ratioamount']) * 100,
+                "super_large_net_inflow": 0.0,
+                "super_large_net_ratio": 0.0,
+                "large_net_inflow": 0.0,
+                "large_net_ratio": 0.0,
+                "medium_net_inflow": 0.0,
+                "medium_net_ratio": 0.0,
+                "small_net_inflow": 0.0,
+                "small_net_ratio": 0.0,
+                "top_stock_name": "-",
+                "top_stock_code": "-",
+                "update_time": latest_day['opendate'],
+                "_code": cat
+            })
+            
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df.sort_values(by="main_net_inflow", ascending=False, inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        df.insert(0, "rank", range(1, len(df) + 1))
+        
     return FundFlowSnapshot(
-        trade_date=latest_ts,
-        rows=df.to_dict(orient="records"),
+        trade_date=pd.Timestamp.now(tz="Asia/Shanghai"),
+        rows=df.to_dict(orient="records") if not df.empty else [],
         code_name_map=code_name_map,
         name_code_map=name_code_map,
-        source_type="sector",
+        source_type="sina",
         indicator=indicator,
     )
+
+
+def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
+    try:
+        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        fields_map = {
+            "today": "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124",
+            "5day": "f12,f14,f2,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f257,f258,f124",
+            "10day": "f12,f14,f2,f160,f174,f175,f176,f177,f178,f179,f180,f181,f182,f183,f260,f261,f124",
+        }
+        params = {
+            "pn": "1",
+            "pz": "500",
+            "po": "1",
+            "np": "1",
+            "ut": "b2884a393a59ad64002292a3e90d46a5",
+            "fltt": "2",
+            "invt": "2",
+            "fid0": _INDICATOR_TO_FIELD[indicator],
+            "fs": _SECTOR_FS[sector_type],
+            "stat": _INDICATOR_TO_STAT[indicator],
+            "fields": fields_map[indicator],
+            "rt": "52975239",
+            "_": int(time.time() * 1000),
+        }
+        session = _get_session()
+        resp = session.get(url, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()["data"]
+        total_page = math.ceil(data["total"] / 500) if data.get("total") else 0
+        frames: List[pd.DataFrame] = []
+        for page in range(1, total_page + 1):
+            params.update({"pn": page})
+            if page != 1:
+                resp = session.get(url, params=params, timeout=20)
+                resp.raise_for_status()
+                data = resp.json()["data"]
+            frames.append(pd.DataFrame(data["diff"]))
+        df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if df.empty:
+            return FundFlowSnapshot(
+                trade_date=_now_shanghai(),
+                rows=[],
+                code_name_map={},
+                name_code_map={},
+                source_type="eastmoney",
+                indicator=indicator,
+            )
+
+        if indicator == "today":
+            rename_map = {
+                "f12": "_code",
+                "f14": "name",
+                "f3": "change_pct",
+                "f62": "main_net_inflow",
+                "f184": "main_net_ratio",
+                "f66": "super_large_net_inflow",
+                "f69": "super_large_net_ratio",
+                "f72": "large_net_inflow",
+                "f75": "large_net_ratio",
+                "f78": "medium_net_inflow",
+                "f81": "medium_net_ratio",
+                "f84": "small_net_inflow",
+                "f87": "small_net_ratio",
+                "f204": "top_stock_name",
+                "f205": "top_stock_code",
+                "f124": "update_time",
+            }
+            columns = _TODAY_COLUMNS
+        elif indicator == "5day":
+            rename_map = {
+                "f12": "_code",
+                "f14": "name",
+                "f109": "change_pct",
+                "f164": "main_net_inflow",
+                "f165": "main_net_ratio",
+                "f166": "super_large_net_inflow",
+                "f167": "super_large_net_ratio",
+                "f168": "large_net_inflow",
+                "f169": "large_net_ratio",
+                "f170": "medium_net_inflow",
+                "f171": "medium_net_ratio",
+                "f172": "small_net_inflow",
+                "f173": "small_net_ratio",
+                "f257": "top_stock_name",
+                "f258": "top_stock_code",
+                "f124": "update_time",
+            }
+            columns = _MULTI_DAY_COLUMNS
+        else:
+            rename_map = {
+                "f12": "_code",
+                "f14": "name",
+                "f160": "change_pct",
+                "f174": "main_net_inflow",
+                "f175": "main_net_ratio",
+                "f176": "super_large_net_inflow",
+                "f177": "super_large_net_ratio",
+                "f178": "large_net_inflow",
+                "f179": "large_net_ratio",
+                "f180": "medium_net_inflow",
+                "f181": "medium_net_ratio",
+                "f182": "small_net_inflow",
+                "f183": "small_net_ratio",
+                "f260": "top_stock_name",
+                "f261": "top_stock_code",
+                "f124": "update_time",
+            }
+            columns = _MULTI_DAY_COLUMNS
+
+        df = df.rename(columns=rename_map)
+        df = df[[col for col in columns if col in df.columns]]
+        numeric_cols = [col for col in df.columns if col not in {"name", "top_stock_name", "top_stock_code", "_code"}]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.sort_values("main_net_inflow", ascending=False).reset_index(drop=True)
+        df.insert(0, "rank", range(1, len(df) + 1))
+
+        name_code_map = dict(zip(df["name"], df["_code"]))
+        code_name_map = {v: k for k, v in name_code_map.items()}
+
+        latest_ts = _now_shanghai()
+        try:
+            if not df.empty and "update_time" in df.columns:
+                ts_raw = int(df.iloc[0]["update_time"])
+                latest_ts = pd.to_datetime(ts_raw, unit="s", utc=True).tz_convert("Asia/Shanghai")
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to parse update_time: %s", e)
+            latest_ts = _now_shanghai()
+
+        return FundFlowSnapshot(
+            trade_date=latest_ts,
+            rows=df.to_dict(orient="records"),
+            code_name_map=code_name_map,
+            name_code_map=name_code_map,
+            source_type="eastmoney",
+            indicator=indicator,
+        )
+    except Exception as e:
+        logger.warning("Failed to load rank snapshot from Eastmoney: %s. Falling back to Sina.", e)
+        try:
+            return _load_rank_snapshot_sina(sector_type, indicator)
+        except Exception as ex:
+            logger.error("Sina rank snapshot fallback failed: %s", ex)
+            return FundFlowSnapshot(
+                trade_date=_now_shanghai(),
+                rows=[],
+                code_name_map={},
+                name_code_map={},
+                source_type="none",
+                indicator=indicator,
+            )
+
+
+def _fetch_sector_minute_kline_sina(session: requests.Session, name_code_map: Dict[str, str], sector_name: str) -> pd.DataFrame:
+    if sector_name not in name_code_map:
+        return pd.DataFrame(columns=_KLINE_COLUMNS)
+    code = name_code_map[sector_name]
+    url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssx_bkzj_fszs?page=1&num=241&bankuai={code}"
+    try:
+        resp = session.get(url, headers={"Referer": "http://vip.stock.finance.sina.com.cn/"}, timeout=15)
+        resp.raise_for_status()
+        raw_data = resp.json()
+        ticks = raw_data[1]
+    except Exception as e:
+        logger.warning("Failed to fetch fszs for %s from Sina: %s", sector_name, e)
+        return pd.DataFrame(columns=_KLINE_COLUMNS)
+
+    rows = []
+    for item in ticks:
+        rows.append({
+            "timestamp": pd.to_datetime(item['opendate'] + ' ' + item['ticktime']),
+            "main_net_inflow": float(item['netamount']),
+            "small_net_inflow": 0.0,
+            "medium_net_inflow": 0.0,
+            "large_net_inflow": 0.0,
+            "super_large_net_inflow": 0.0
+        })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df.sort_values(by="timestamp", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+    else:
+        df = pd.DataFrame(columns=_KLINE_COLUMNS)
+    return df
 
 
 def _fetch_sector_minute_kline(session: requests.Session, name_code_map: Dict[str, str], sector_name: str) -> pd.DataFrame:
@@ -351,7 +512,10 @@ def _load_selected_sector_minute_klines(snapshot: FundFlowSnapshot, names: List[
     result: Dict[str, pd.DataFrame] = {}
 
     def _load(name: str) -> tuple[str, pd.DataFrame]:
-        return name, _fetch_sector_minute_kline(session, snapshot.name_code_map, name)
+        if snapshot.source_type == "sina":
+            return name, _fetch_sector_minute_kline_sina(session, snapshot.name_code_map, name)
+        else:
+            return name, _fetch_sector_minute_kline(session, snapshot.name_code_map, name)
 
     with ThreadPoolExecutor(max_workers=min(max(len(names), 1), 12)) as executor:
         futures = [executor.submit(_load, name) for name in set(names)]
@@ -410,10 +574,11 @@ def _render_metric_row(snapshot: FundFlowSnapshot, used_kline_rows: int, top_n: 
     if not snapshot.rows:
         return
     latest_ts = snapshot.trade_date
+    help_text = "新浪财经板块资金流接口返回的最新时间戳；盘后通常为当日收盘时间。" if snapshot.source_type == "sina" else "东方财富板块资金流接口返回的最新时间戳；盘后通常为当日收盘时间。"
     st.metric(
         "数据更新时间",
         value=latest_ts.strftime("%Y-%m-%d %H:%M"),
-        help="东方财富板块资金流接口返回的最新时间戳；盘后通常为当日收盘时间。",
+        help=help_text,
     )
     selected_display = min(len(snapshot.rows), top_n) if top_n else 12
     st.caption(
@@ -530,7 +695,6 @@ def _render_rank_table(snapshot: FundFlowSnapshot, selected_names: List[str]) ->
 
 def render_fund_flow_page() -> None:
     st.title("实时板块资金流向")
-    st.caption("数据来源：东方财富数据中心；分时曲线基于板块分钟级资金流明细，排行表支持今日/5日/10日口径。")
 
     with st.sidebar:
         st.subheader("筛选条件")
@@ -583,6 +747,9 @@ def render_fund_flow_page() -> None:
             args=(top_n_key,),
         )
         refresh_seconds = st.number_input("自动刷新间隔（秒）", min_value=5, max_value=120, value=15, step=5)
+
+    source_desc = "新浪财经 (备份源)" if snapshot.source_type == "sina" else "东方财富 (官方源)"
+    st.caption(f"数据来源：{source_desc}；分时曲线基于板块分钟级资金流明细，排行表支持今日/5日/10日口径。")
 
     now = _now_shanghai()
     refresh_interval = max(int(refresh_seconds), _refresh_interval_seconds(now))
