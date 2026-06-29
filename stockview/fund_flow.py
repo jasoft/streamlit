@@ -462,6 +462,8 @@ def _fetch_sector_minute_kline_sina(session: requests.Session, name_code_map: Di
 
     rows = []
     for item in ticks:
+        if item.get('ticktime') in {"14:58:00", "14:59:00", "15:00:00"}:
+            continue
         rows.append({
             "timestamp": pd.to_datetime(item['opendate'] + ' ' + item['ticktime']),
             "main_net_inflow": float(item['netamount']),
