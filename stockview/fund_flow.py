@@ -526,7 +526,6 @@ def _fetch_sector_minute_kline(session: requests.Session, name_code_map: Dict[st
         return df
     except Exception as e:
         logger.warning("Failed to fetch kline from Eastmoney: %s. Falling back to Sina.", e)
-        st.session_state["use_sina_source"] = True
         return _fetch_sector_minute_kline_sina(session, name_code_map, sector_name)
 
 
@@ -748,7 +747,14 @@ def _get_cached_snapshot(sector_type: str, indicator: str, refresh_interval: int
             try:
                 snap = _load_rank_snapshot(sector_type, indicator)
                 with _GLOBAL_CACHE_LOCK:
-                    _GLOBAL_SNAPSHOT_CACHE[key] = (snap, time.time())
+                    if not snap.rows and key in _GLOBAL_SNAPSHOT_CACHE:
+                        old_snap, _ = _GLOBAL_SNAPSHOT_CACHE[key]
+                        if old_snap.rows:
+                            _GLOBAL_SNAPSHOT_CACHE[key] = (old_snap, time.time())
+                        else:
+                            _GLOBAL_SNAPSHOT_CACHE[key] = (snap, time.time())
+                    else:
+                        _GLOBAL_SNAPSHOT_CACHE[key] = (snap, time.time())
             except Exception as e:
                 logger.error("Async snapshot fetch failed: %s", e)
                 with _GLOBAL_CACHE_LOCK:
@@ -831,7 +837,14 @@ def _get_cached_klines(snapshot: FundFlowSnapshot, names: List[str], refresh_int
                     for future in as_completed(futures):
                         name, df = future.result()
                         with _GLOBAL_CACHE_LOCK:
-                            _GLOBAL_KLINE_CACHE[name] = (df, time.time())
+                            if df.empty and name in _GLOBAL_KLINE_CACHE:
+                                old_df, _ = _GLOBAL_KLINE_CACHE[name]
+                                if not old_df.empty:
+                                    _GLOBAL_KLINE_CACHE[name] = (old_df, time.time())
+                                else:
+                                    _GLOBAL_KLINE_CACHE[name] = (df, time.time())
+                            else:
+                                _GLOBAL_KLINE_CACHE[name] = (df, time.time())
             except Exception as e:
                 logger.error("Async kline fetch pool failed: %s", e)
                 with _GLOBAL_CACHE_LOCK:
