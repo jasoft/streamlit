@@ -784,118 +784,122 @@ def render_fund_flow_page() -> None:
             index=0,
             format_func=lambda x: {"today": "今日净流入", "5day": "5日累计净流入", "10day": "10日累计净流入"}[x],
         )
-        refresh_seconds = st.number_input("自动刷新间隔（秒）", min_value=5, max_value=120, value=15, step=5)
-
-    now = _now_shanghai()
-    refresh_interval = max(int(refresh_seconds), _refresh_interval_seconds(now))
-
-    # 使用 st.fragment 实现无感、无白屏局部刷新，并且通过 run_every 定期检查是否需要后台静默更新
-    @st.fragment(run_every=refresh_interval)
-    def render_content_fragment():
-        cache = st.session_state.get("fund_flow_cache")
         
-        # 1. 确保在当前分类/口径下，缓存里存有 snapshot
-        if cache is None or cache["sector_type"] != sector_type or cache["indicator"] != indicator:
-            with st.spinner("正在加载排行数据..."):
-                snapshot = _load_rank_snapshot(sector_type, indicator)
-            cache = {
-                "snapshot": snapshot,
+        # Load snapshot once to initialize sliders instantly on outer page load
+        cache = st.session_state.get("fund_flow_cache")
+        if cache is not None and cache["sector_type"] == sector_type and cache["indicator"] == indicator:
+            snapshot_init = cache["snapshot"]
+        else:
+            snapshot_init = _load_rank_snapshot(sector_type, indicator)
+            # Seed cache with snapshot and empty klines
+            st.session_state["fund_flow_cache"] = {
+                "snapshot": snapshot_init,
                 "klines": {},
                 "last_updated": time.time(),
                 "sector_type": sector_type,
                 "indicator": indicator,
                 "selected_names": [],
             }
-            st.session_state["fund_flow_cache"] = cache
-            
-        snapshot = cache["snapshot"]
         
-        # 2. 从分片内部渲染侧边栏的过滤滑块与展示数量滑块
-        with st.sidebar:
-            # 动态计算最大值，作为过滤滑动条的上限（亿元）
-            max_val_yuan = max([abs(row.get("main_net_inflow", 0)) for row in snapshot.rows]) if snapshot.rows else 0
-            max_val_yi = float(math.ceil(max_val_yuan / 1e8))
-            max_slider_val = max(max_val_yi, 1.0)
-            
-            # 过滤不活跃板块滑块
-            min_flow_key = "fund_flow_min_flow"
-            init_min_flow = init_slider_state(min_flow_key, default_value=0.0, min_value=0.0, max_value=max_slider_val)
-            min_flow = st.slider(
-                "过滤不活跃板块 (绝对值 ≥ N 亿元)",
-                min_value=0.0,
-                max_value=max_slider_val,
-                value=init_min_flow,
-                step=0.5 if max_slider_val <= 50.0 else 1.0,
-                key=min_flow_key,
-                on_change=on_slider_change,
-                args=(min_flow_key,),
-                help="仅展示累计主力净流入/流出绝对值大于或等于该设定值的板块",
-            )
-            
-            # Top N 个板块滑块
-            top_n_key = "fund_flow_top_n"
-            init_top_n = init_slider_state(top_n_key, default_value=12, min_value=3, max_value=30)
-            top_n = st.slider(
-                "分时曲线展示前 N 个板块",
-                min_value=3,
-                max_value=30,
-                value=init_top_n,
-                step=1,
-                key=top_n_key,
-                on_change=on_slider_change,
-                args=(top_n_key,),
-            )
-
-        # 3. 渲染对比多选框
-        threshold_yuan = min_flow * 1e8
-        filtered_rows = [row for row in snapshot.rows if abs(row.get("main_net_inflow", 0)) >= threshold_yuan]
+        # 动态计算最大值，作为过滤滑动条的上限（亿元）
+        max_val_yuan = max([abs(row.get("main_net_inflow", 0)) for row in snapshot_init.rows]) if snapshot_init.rows else 0
+        max_val_yi = float(math.ceil(max_val_yuan / 1e8))
+        max_slider_val = max(max_val_yi, 1.0)
         
-        if not filtered_rows:
-            st.warning(f"当前过滤阈值过高，无累计主力净流入/流出绝对值 ≥ {min_flow} 亿元的板块，请调低过滤条件。")
-            return
-            
-        default_names = _pick_default_top_names(filtered_rows, top_n)
-        selected_names = st.multiselect(
-            f"选择要对比的板块（默认展示净流入前 {top_n} 个与后 {top_n} 个）",
-            options=[row["name"] for row in filtered_rows],
-            default=default_names,
-            key="fund_flow_selected_names_multiselect"
+        # 过滤不活跃板块滑块
+        min_flow_key = "fund_flow_min_flow"
+        init_min_flow = init_slider_state(min_flow_key, default_value=0.0, min_value=0.0, max_value=max_slider_val)
+        min_flow = st.slider(
+            "过滤不活跃板块 (绝对值 ≥ N 亿元)",
+            min_value=0.0,
+            max_value=max_slider_val,
+            value=init_min_flow,
+            step=0.5 if max_slider_val <= 50.0 else 1.0,
+            key=min_flow_key,
+            on_change=on_slider_change,
+            args=(min_flow_key,),
+            help="仅展示累计主力净流入/流出绝对值大于或等于该设定值的板块",
         )
+        
+        # Top N 个板块滑块
+        top_n_key = "fund_flow_top_n"
+        init_top_n = init_slider_state(top_n_key, default_value=12, min_value=3, max_value=30)
+        top_n = st.slider(
+            "分时曲线展示前 N 个板块",
+            min_value=3,
+            max_value=30,
+            value=init_top_n,
+            step=1,
+            key=top_n_key,
+            on_change=on_slider_change,
+            args=(top_n_key,),
+        )
+        refresh_seconds = st.number_input("自动刷新间隔（秒）", min_value=5, max_value=120, value=15, step=5)
 
-        # 4. 判断是否需要异步获取分时趋势
+    now = _now_shanghai()
+    refresh_interval = max(int(refresh_seconds), _refresh_interval_seconds(now))
+
+    # Calculate selection options outside the fragment so the multiselect is fully operational
+    threshold_yuan = min_flow * 1e8
+    filtered_rows = [row for row in snapshot_init.rows if abs(row.get("main_net_inflow", 0)) >= threshold_yuan]
+    
+    if not filtered_rows:
+        st.warning(f"当前过滤阈值过高，无累计主力净流入/流出绝对值 ≥ {min_flow} 亿元的板块，请调低过滤条件。")
+        return
+        
+    default_names = _pick_default_top_names(filtered_rows, top_n)
+    selected_names = st.multiselect(
+        f"选择要对比的板块（默认展示净流入前 {top_n} 个与后 {top_n} 个）",
+        options=[row["name"] for row in filtered_rows],
+        default=default_names,
+        key="fund_flow_selected_names_multiselect"
+    )
+
+    # 使用 st.fragment 实现无感、无白屏局部刷新，并且通过 run_every 定期检查是否需要后台静默更新
+    @st.fragment(run_every=refresh_interval)
+    def render_content_fragment():
+        cache = st.session_state.get("fund_flow_cache")
         now_ts = time.time()
+        
+        # Determine if we need to fetch data
         need_fetch = False
-        if not cache["klines"]:
+        if cache is None:
             need_fetch = True
-        elif cache["selected_names"] != selected_names:
+        elif (cache["sector_type"] != sector_type or 
+              cache["indicator"] != indicator or 
+              cache["selected_names"] != selected_names):
             need_fetch = True
         elif now_ts - cache["last_updated"] >= refresh_interval:
             need_fetch = True
 
         if need_fetch and not st.session_state["fund_flow_is_fetching"]:
             _trigger_async_fetch(sector_type, indicator, selected_names)
+            
+        # Display SWR stale-while-revalidate data (or loading info on first load)
+        if cache is not None and cache["snapshot"]["indicator"] == indicator:
+            snapshot = cache["snapshot"]
+            klines = cache["klines"]
+            
+            source_desc = "新浪财经 (备份源)" if snapshot.source_type == "sina" else "东方财富 (官方源)"
+            fetching_status = " (🔄 正在后台刷新...)" if st.session_state["fund_flow_is_fetching"] else ""
+            st.caption(f"数据来源：{source_desc}；分时曲线基于板块分钟级资金流明细，排行表支持今日/5日/10日口径。{fetching_status}")
 
-        # 5. 渲染页面内容
-        source_desc = "新浪财经 (备份源)" if snapshot.source_type == "sina" else "东方财富 (官方源)"
-        fetching_status = " (🔄 正在后台刷新...)" if st.session_state["fund_flow_is_fetching"] else ""
-        st.caption(f"数据来源：{source_desc}；分时曲线基于板块分钟级资金流明细，排行表支持今日/5日/10日口径。{fetching_status}")
+            if klines:
+                trend_df = _build_trend_frame(klines)
+                used_kline_rows = int(trend_df.shape[0])
+                _render_metric_row(snapshot, used_kline_rows, top_n=int(top_n))
 
-        if cache["klines"]:
-            trend_df = _build_trend_frame(cache["klines"])
-            used_kline_rows = int(trend_df.shape[0])
-            _render_metric_row(snapshot, used_kline_rows, top_n=int(top_n))
+                fig = _plot_sector_trend(trend_df, name_annotation="end")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("🔄 正在后台加载分时趋势曲线数据，请稍候...")
 
-            fig = _plot_sector_trend(trend_df, name_annotation="end")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("🔄 正在后台加载分时趋势曲线数据，请稍候...")
-
-        tab_rank, tab_detail = st.tabs(["板块排行", "说明与口径"])
-        with tab_rank:
-            _render_rank_table(snapshot, selected_names)
-        with tab_detail:
-            st.markdown(
-                """
+            tab_rank, tab_detail = st.tabs(["板块排行", "说明与口径"])
+            with tab_rank:
+                _render_rank_table(snapshot, selected_names)
+            with tab_detail:
+                st.markdown(
+                    """
 **页面逻辑说明**
 
 1. 左侧支持切换行业/概念/地域板块，以及今日、5日、10日三种口径。
@@ -909,14 +913,15 @@ def render_fund_flow_page() -> None:
 - 领涨/领跌股字段来自东方财富板块资金流排名接口原始返回。
 - 数据更新时间取自接口返回的最新时间戳，不一定等于页面刷新时间。
 """
-            )
+                )
+        else:
+            st.info("🔄 正在后台加载板块分时数据，请稍候...")
 
         logger.debug(
-            "fund_flow_render_fragment sector_type=%s indicator=%s top_n=%s rows=%s",
+            "fund_flow_render_fragment sector_type=%s indicator=%s top_n=%s",
             sector_type,
             indicator,
-            top_n,
-            len(snapshot_init.rows)
+            top_n
         )
 
     # 渲染分片内容
