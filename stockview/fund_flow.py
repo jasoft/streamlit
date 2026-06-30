@@ -751,6 +751,21 @@ def _get_cached_snapshot(sector_type: str, indicator: str, refresh_interval: int
                     _GLOBAL_SNAPSHOT_CACHE[key] = (snap, time.time())
             except Exception as e:
                 logger.error("Async snapshot fetch failed: %s", e)
+                with _GLOBAL_CACHE_LOCK:
+                    # Update timestamp on failure to prevent immediately retrying
+                    if key in _GLOBAL_SNAPSHOT_CACHE:
+                        old_snap, _ = _GLOBAL_SNAPSHOT_CACHE[key]
+                        _GLOBAL_SNAPSHOT_CACHE[key] = (old_snap, time.time())
+                    else:
+                        empty_snap = FundFlowSnapshot(
+                            trade_date=_now_shanghai(),
+                            rows=[],
+                            code_name_map={},
+                            name_code_map={},
+                            source_type="none",
+                            indicator=indicator
+                        )
+                        _GLOBAL_SNAPSHOT_CACHE[key] = (empty_snap, time.time())
             finally:
                 with _GLOBAL_CACHE_LOCK:
                     _GLOBAL_FETCHING_SNAPSHOTS.discard(key)
@@ -801,10 +816,15 @@ def _get_cached_klines(snapshot: FundFlowSnapshot, names: List[str], refresh_int
             try:
                 session = _get_session()
                 def _load(n: str):
-                    if snapshot.source_type == "sina":
-                        return n, _fetch_sector_minute_kline_sina(session, snapshot.name_code_map, n)
-                    else:
-                        return n, _fetch_sector_minute_kline(session, snapshot.name_code_map, n)
+                    try:
+                        if snapshot.source_type == "sina":
+                            df = _fetch_sector_minute_kline_sina(session, snapshot.name_code_map, n)
+                        else:
+                            df = _fetch_sector_minute_kline(session, snapshot.name_code_map, n)
+                        return n, df
+                    except Exception as ex:
+                        logger.error("Failed to fetch kline for %s: %s", n, ex)
+                        return n, pd.DataFrame(columns=_KLINE_COLUMNS)
                         
                 with ThreadPoolExecutor(max_workers=min(len(names_to_fetch), 12)) as executor:
                     futures = [executor.submit(_load, n) for n in names_to_fetch]
@@ -813,7 +833,14 @@ def _get_cached_klines(snapshot: FundFlowSnapshot, names: List[str], refresh_int
                         with _GLOBAL_CACHE_LOCK:
                             _GLOBAL_KLINE_CACHE[name] = (df, time.time())
             except Exception as e:
-                logger.error("Async kline fetch failed: %s", e)
+                logger.error("Async kline fetch pool failed: %s", e)
+                with _GLOBAL_CACHE_LOCK:
+                    for n in names_to_fetch:
+                        if n not in _GLOBAL_KLINE_CACHE:
+                            _GLOBAL_KLINE_CACHE[n] = (pd.DataFrame(columns=_KLINE_COLUMNS), time.time())
+                        else:
+                            old_df, _ = _GLOBAL_KLINE_CACHE[n]
+                            _GLOBAL_KLINE_CACHE[n] = (old_df, time.time())
             finally:
                 with _GLOBAL_CACHE_LOCK:
                     for n in names_to_fetch:
