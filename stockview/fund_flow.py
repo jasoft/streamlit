@@ -295,6 +295,20 @@ def _load_rank_snapshot_sina(sector_type: str, indicator: str) -> FundFlowSnapsh
 
 
 def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
+    if st.session_state.get("use_sina_source", False):
+        try:
+            return _load_rank_snapshot_sina(sector_type, indicator)
+        except Exception as ex:
+            logger.error("Sina rank snapshot fallback failed: %s", ex)
+            return FundFlowSnapshot(
+                trade_date=_now_shanghai(),
+                rows=[],
+                code_name_map={},
+                name_code_map={},
+                source_type="none",
+                indicator=indicator,
+            )
+
     try:
         url = "https://push2.eastmoney.com/api/qt/clist/get"
         fields_map = {
@@ -318,7 +332,7 @@ def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
             "_": int(time.time() * 1000),
         }
         session = _get_session()
-        resp = session.get(url, params=params, timeout=20)
+        resp = session.get(url, params=params, timeout=1.0)
         resp.raise_for_status()
         data = resp.json()["data"]
         total_page = math.ceil(data["total"] / 500) if data.get("total") else 0
@@ -326,7 +340,7 @@ def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
         for page in range(1, total_page + 1):
             params.update({"pn": page})
             if page != 1:
-                resp = session.get(url, params=params, timeout=20)
+                resp = session.get(url, params=params, timeout=1.0)
                 resp.raise_for_status()
                 data = resp.json()["data"]
             frames.append(pd.DataFrame(data["diff"]))
@@ -494,18 +508,23 @@ def _fetch_sector_minute_kline(session: requests.Session, name_code_map: Dict[st
         "klt": "1",
         "ut": "b2884a393a59ad64002292a3e90d46a5",
     }
-    resp = session.get(url, params=params, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()["data"]["klines"]
-    if not data:
-        return pd.DataFrame(columns=_KLINE_COLUMNS)
-    rows = [line.split(",") for line in data]
-    df = pd.DataFrame(rows, columns=_KLINE_COLUMNS[: len(rows[0])])
-    df = df[_KLINE_COLUMNS]
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    for col in _KLINE_COLUMNS[1:]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
+    try:
+        resp = session.get(url, params=params, timeout=1.0)
+        resp.raise_for_status()
+        data = resp.json()["data"]["klines"]
+        if not data:
+            return pd.DataFrame(columns=_KLINE_COLUMNS)
+        rows = [line.split(",") for line in data]
+        df = pd.DataFrame(rows, columns=_KLINE_COLUMNS[: len(rows[0])])
+        df = df[_KLINE_COLUMNS]
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        for col in _KLINE_COLUMNS[1:]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+    except Exception as e:
+        logger.warning("Failed to fetch kline from Eastmoney: %s. Falling back to Sina.", e)
+        st.session_state["use_sina_source"] = True
+        return _fetch_sector_minute_kline_sina(session, name_code_map, sector_name)
 
 
 def _load_selected_sector_minute_klines(snapshot: FundFlowSnapshot, names: List[str]) -> Dict[str, pd.DataFrame]:
@@ -696,6 +715,9 @@ def _render_rank_table(snapshot: FundFlowSnapshot, selected_names: List[str]) ->
 
 
 def render_fund_flow_page() -> None:
+    if "use_sina_source" not in st.session_state:
+        st.session_state["use_sina_source"] = False
+
     st.title("实时板块资金流向")
 
     with st.sidebar:
@@ -713,10 +735,10 @@ def render_fund_flow_page() -> None:
             format_func=lambda x: {"today": "今日净流入", "5day": "5日累计净流入", "10day": "10日累计净流入"}[x],
         )
         
-        snapshot = _load_rank_snapshot(sector_type, indicator)
+        snapshot_init = _load_rank_snapshot(sector_type, indicator)
         
         # 动态计算最大值，作为过滤滑动条的上限（亿元）
-        max_val_yuan = max([abs(row.get("main_net_inflow", 0)) for row in snapshot.rows]) if snapshot.rows else 0
+        max_val_yuan = max([abs(row.get("main_net_inflow", 0)) for row in snapshot_init.rows]) if snapshot_init.rows else 0
         max_val_yi = float(math.ceil(max_val_yuan / 1e8))
         max_slider_val = max(max_val_yi, 1.0)
         
@@ -750,43 +772,46 @@ def render_fund_flow_page() -> None:
         )
         refresh_seconds = st.number_input("自动刷新间隔（秒）", min_value=5, max_value=120, value=15, step=5)
 
-    source_desc = "新浪财经 (备份源)" if snapshot.source_type == "sina" else "东方财富 (官方源)"
-    st.caption(f"数据来源：{source_desc}；分时曲线基于板块分钟级资金流明细，排行表支持今日/5日/10日口径。")
-
     now = _now_shanghai()
     refresh_interval = max(int(refresh_seconds), _refresh_interval_seconds(now))
-    st_autorefresh = __import__("streamlit_autorefresh", fromlist=["st_autorefresh"]).st_autorefresh
-    st_autorefresh(interval=refresh_interval * 1000, key="fund_flow_autorefresh")
 
-    # 根据过滤阈值筛选板块
-    threshold_yuan = min_flow * 1e8
-    filtered_rows = [row for row in snapshot.rows if abs(row.get("main_net_inflow", 0)) >= threshold_yuan]
-    
-    if not filtered_rows:
-        st.warning(f"当前过滤阈值过高，无累计主力净流入/流出绝对值 ≥ {min_flow} 亿元的板块，请调低过滤条件。")
-        st.stop()
+    # 使用 st.fragment 实现无感、无白屏局部刷新
+    @st.fragment(run_every=refresh_interval)
+    def render_content_fragment():
+        snapshot = _load_rank_snapshot(sector_type, indicator)
+        source_desc = "新浪财经 (备份源)" if snapshot.source_type == "sina" else "东方财富 (官方源)"
+        st.caption(f"数据来源：{source_desc}；分时曲线基于板块分钟级资金流明细，排行表支持今日/5日/10日口径。")
+
+        # 根据过滤阈值筛选板块
+        threshold_yuan = min_flow * 1e8
+        filtered_rows = [row for row in snapshot.rows if abs(row.get("main_net_inflow", 0)) >= threshold_yuan]
         
-    default_names = _pick_default_top_names(filtered_rows, top_n)
-    selected_names = st.multiselect(
-        f"选择要对比的板块（默认展示净流入前 {top_n} 个与后 {top_n} 个）",
-        options=[row["name"] for row in filtered_rows],
-        default=default_names,
-    )
+        if not filtered_rows:
+            st.warning(f"当前过滤阈值过高，无累计主力净流入/流出绝对值 ≥ {min_flow} 亿元的板块，请调低过滤条件。")
+            return
+            
+        default_names = _pick_default_top_names(filtered_rows, top_n)
+        selected_names = st.multiselect(
+            f"选择要对比的板块（默认展示净流入前 {top_n} 个与后 {top_n} 个）",
+            options=[row["name"] for row in filtered_rows],
+            default=default_names,
+            key="fund_flow_selected_names_multiselect"
+        )
 
-    klines = _load_selected_sector_minute_klines(snapshot, selected_names)
-    trend_df = _build_trend_frame(klines)
-    used_kline_rows = int(trend_df.shape[0])
-    _render_metric_row(snapshot, used_kline_rows, top_n=int(top_n))
+        klines = _load_selected_sector_minute_klines(snapshot, selected_names)
+        trend_df = _build_trend_frame(klines)
+        used_kline_rows = int(trend_df.shape[0])
+        _render_metric_row(snapshot, used_kline_rows, top_n=int(top_n))
 
-    fig = _plot_sector_trend(trend_df, name_annotation="end")
-    st.plotly_chart(fig, use_container_width=True)
+        fig = _plot_sector_trend(trend_df, name_annotation="end")
+        st.plotly_chart(fig, use_container_width=True)
 
-    tab_rank, tab_detail = st.tabs(["板块排行", "说明与口径"])
-    with tab_rank:
-        _render_rank_table(snapshot, selected_names)
-    with tab_detail:
-        st.markdown(
-            """
+        tab_rank, tab_detail = st.tabs(["板块排行", "说明与口径"])
+        with tab_rank:
+            _render_rank_table(snapshot, selected_names)
+        with tab_detail:
+            st.markdown(
+                """
 **页面逻辑说明**
 
 1. 左侧支持切换行业/概念/地域板块，以及今日、5日、10日三种口径。
@@ -800,13 +825,16 @@ def render_fund_flow_page() -> None:
 - 领涨/领跌股字段来自东方财富板块资金流排名接口原始返回。
 - 数据更新时间取自接口返回的最新时间戳，不一定等于页面刷新时间。
 """
+            )
+
+        logger.debug(
+            "fund_flow_render_fragment sector_type=%s indicator=%s top_n=%s rows=%s kline_rows=%s",
+            sector_type,
+            indicator,
+            top_n,
+            len(snapshot.rows),
+            used_kline_rows,
         )
 
-    logger.debug(
-        "fund_flow_render sector_type=%s indicator=%s top_n=%s rows=%s kline_rows=%s",
-        sector_type,
-        indicator,
-        top_n,
-        len(snapshot.rows),
-        used_kline_rows,
-    )
+    # 渲染分片内容
+    render_content_fragment()
