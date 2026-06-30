@@ -876,7 +876,7 @@ def render_fund_flow_page() -> None:
             _trigger_async_fetch(sector_type, indicator, selected_names)
             
         # Display SWR stale-while-revalidate data (or loading info on first load)
-        if cache is not None and cache["snapshot"]["indicator"] == indicator:
+        if cache is not None and cache["snapshot"].indicator == indicator:
             snapshot = cache["snapshot"]
             klines = cache["klines"]
             
