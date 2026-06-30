@@ -717,56 +717,121 @@ def _render_rank_table(snapshot: FundFlowSnapshot, selected_names: List[str]) ->
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
-def _async_fetch_worker(sector_type: str, indicator: str, selected_names: List[str]):
-    try:
-        snapshot = _load_rank_snapshot(sector_type, indicator)
-        klines = _load_selected_sector_minute_klines(snapshot, selected_names)
-        
-        # Verify user selections haven't changed while we were fetching
-        if (st.session_state.get("fund_flow_req_sector_type") == sector_type and
-            st.session_state.get("fund_flow_req_indicator") == indicator and
-            st.session_state.get("fund_flow_req_selected_names") == selected_names):
-            
-            st.session_state["fund_flow_cache"] = {
-                "snapshot": snapshot,
-                "klines": klines,
-                "last_updated": time.time(),
-                "sector_type": sector_type,
-                "indicator": indicator,
-                "selected_names": selected_names,
-            }
-            st.session_state["fund_flow_fetch_error"] = None
-    except Exception as e:
-        logger.error("Async background fetch failed: %s", e)
-        st.session_state["fund_flow_fetch_error"] = str(e)
-    finally:
-        st.session_state["fund_flow_is_fetching"] = False
-        runtime = get_instance()
-        if runtime:
-            runtime.request_rerun()
+_GLOBAL_CACHE_LOCK = threading.Lock()
+_GLOBAL_SNAPSHOT_CACHE: Dict[tuple[str, str], tuple[FundFlowSnapshot, float]] = {}
+_GLOBAL_KLINE_CACHE: Dict[str, tuple[pd.DataFrame, float]] = {}
+_GLOBAL_FETCHING_SECTORS: set[str] = set()
+_GLOBAL_FETCHING_SNAPSHOTS: set[tuple[str, str]] = set()
 
 
-def _trigger_async_fetch(sector_type: str, indicator: str, selected_names: List[str]):
-    st.session_state["fund_flow_is_fetching"] = True
-    st.session_state["fund_flow_req_sector_type"] = sector_type
-    st.session_state["fund_flow_req_indicator"] = indicator
-    st.session_state["fund_flow_req_selected_names"] = selected_names
+def _get_cached_snapshot(sector_type: str, indicator: str, refresh_interval: int) -> FundFlowSnapshot:
+    key = (sector_type, indicator)
+    now_ts = time.time()
     
-    t = threading.Thread(
-        target=_async_fetch_worker,
-        args=(sector_type, indicator, selected_names)
-    )
-    add_script_run_ctx(t)
-    t.start()
+    with _GLOBAL_CACHE_LOCK:
+        cache_entry = _GLOBAL_SNAPSHOT_CACHE.get(key)
+        
+    if cache_entry is not None:
+        snapshot, last_updated = cache_entry
+        if now_ts - last_updated < refresh_interval:
+            return snapshot
+            
+    # Stale or missing snapshot: trigger fetch
+    should_start = False
+    with _GLOBAL_CACHE_LOCK:
+        if key not in _GLOBAL_FETCHING_SNAPSHOTS:
+            _GLOBAL_FETCHING_SNAPSHOTS.add(key)
+            should_start = True
+            
+    if should_start:
+        def fetch_task():
+            try:
+                snap = _load_rank_snapshot(sector_type, indicator)
+                with _GLOBAL_CACHE_LOCK:
+                    _GLOBAL_SNAPSHOT_CACHE[key] = (snap, time.time())
+            except Exception as e:
+                logger.error("Async snapshot fetch failed: %s", e)
+            finally:
+                with _GLOBAL_CACHE_LOCK:
+                    _GLOBAL_FETCHING_SNAPSHOTS.discard(key)
+                runtime = get_instance()
+                if runtime:
+                    runtime.request_rerun()
+                    
+        t = threading.Thread(target=fetch_task)
+        add_script_run_ctx(t)
+        t.start()
+        
+    if cache_entry is not None:
+        return cache_entry[0]
+        
+    # No cache at all: fetch synchronously to bootstrap
+    snap = _load_rank_snapshot(sector_type, indicator)
+    with _GLOBAL_CACHE_LOCK:
+        _GLOBAL_SNAPSHOT_CACHE[key] = (snap, time.time())
+    return snap
+
+
+def _get_cached_klines(snapshot: FundFlowSnapshot, names: List[str], refresh_interval: int) -> Dict[str, pd.DataFrame]:
+    now_ts = time.time()
+    result: Dict[str, pd.DataFrame] = {}
+    stale_or_missing_names = []
+    
+    with _GLOBAL_CACHE_LOCK:
+        for name in names:
+            cache_entry = _GLOBAL_KLINE_CACHE.get(name)
+            if cache_entry is not None:
+                df, last_updated = cache_entry
+                result[name] = df
+                if now_ts - last_updated >= refresh_interval:
+                    stale_or_missing_names.append(name)
+            else:
+                stale_or_missing_names.append(name)
+                
+    # Filter names that are already being fetched
+    names_to_fetch = []
+    with _GLOBAL_CACHE_LOCK:
+        for n in stale_or_missing_names:
+            if n not in _GLOBAL_FETCHING_SECTORS:
+                _GLOBAL_FETCHING_SECTORS.add(n)
+                names_to_fetch.append(n)
+                
+    if names_to_fetch:
+        def fetch_task():
+            try:
+                session = _get_session()
+                def _load(n: str):
+                    if snapshot.source_type == "sina":
+                        return n, _fetch_sector_minute_kline_sina(session, snapshot.name_code_map, n)
+                    else:
+                        return n, _fetch_sector_minute_kline(session, snapshot.name_code_map, n)
+                        
+                with ThreadPoolExecutor(max_workers=min(len(names_to_fetch), 12)) as executor:
+                    futures = [executor.submit(_load, n) for n in names_to_fetch]
+                    for future in as_completed(futures):
+                        name, df = future.result()
+                        with _GLOBAL_CACHE_LOCK:
+                            _GLOBAL_KLINE_CACHE[name] = (df, time.time())
+            except Exception as e:
+                logger.error("Async kline fetch failed: %s", e)
+            finally:
+                with _GLOBAL_CACHE_LOCK:
+                    for n in names_to_fetch:
+                        _GLOBAL_FETCHING_SECTORS.discard(n)
+                runtime = get_instance()
+                if runtime:
+                    runtime.request_rerun()
+                    
+        t = threading.Thread(target=fetch_task)
+        add_script_run_ctx(t)
+        t.start()
+        
+    return result
 
 
 def render_fund_flow_page() -> None:
     if "use_sina_source" not in st.session_state:
         st.session_state["use_sina_source"] = False
-    if "fund_flow_is_fetching" not in st.session_state:
-        st.session_state["fund_flow_is_fetching"] = False
-    if "fund_flow_cache" not in st.session_state:
-        st.session_state["fund_flow_cache"] = None
 
     st.title("实时板块资金流向")
 
@@ -784,122 +849,120 @@ def render_fund_flow_page() -> None:
             index=0,
             format_func=lambda x: {"today": "今日净流入", "5day": "5日累计净流入", "10day": "10日累计净流入"}[x],
         )
-        
-        # Load snapshot once to initialize sliders instantly on outer page load
-        cache = st.session_state.get("fund_flow_cache")
-        if cache is not None and cache["sector_type"] == sector_type and cache["indicator"] == indicator:
-            snapshot_init = cache["snapshot"]
-        else:
-            snapshot_init = _load_rank_snapshot(sector_type, indicator)
-            # Seed cache with snapshot and empty klines
-            st.session_state["fund_flow_cache"] = {
-                "snapshot": snapshot_init,
-                "klines": {},
-                "last_updated": time.time(),
-                "sector_type": sector_type,
-                "indicator": indicator,
-                "selected_names": [],
-            }
-        
-        # 动态计算最大值，作为过滤滑动条的上限（亿元）
-        max_val_yuan = max([abs(row.get("main_net_inflow", 0)) for row in snapshot_init.rows]) if snapshot_init.rows else 0
-        max_val_yi = float(math.ceil(max_val_yuan / 1e8))
-        max_slider_val = max(max_val_yi, 1.0)
-        
-        # 过滤不活跃板块滑块
-        min_flow_key = "fund_flow_min_flow"
-        init_min_flow = init_slider_state(min_flow_key, default_value=0.0, min_value=0.0, max_value=max_slider_val)
-        min_flow = st.slider(
-            "过滤不活跃板块 (绝对值 ≥ N 亿元)",
-            min_value=0.0,
-            max_value=max_slider_val,
-            value=init_min_flow,
-            step=0.5 if max_slider_val <= 50.0 else 1.0,
-            key=min_flow_key,
-            on_change=on_slider_change,
-            args=(min_flow_key,),
-            help="仅展示累计主力净流入/流出绝对值大于或等于该设定值的板块",
-        )
-        
-        # Top N 个板块滑块
-        top_n_key = "fund_flow_top_n"
-        init_top_n = init_slider_state(top_n_key, default_value=12, min_value=3, max_value=30)
-        top_n = st.slider(
-            "分时曲线展示前 N 个板块",
-            min_value=3,
-            max_value=30,
-            value=init_top_n,
-            step=1,
-            key=top_n_key,
-            on_change=on_slider_change,
-            args=(top_n_key,),
-        )
         refresh_seconds = st.number_input("自动刷新间隔（秒）", min_value=5, max_value=120, value=15, step=5)
 
     now = _now_shanghai()
     refresh_interval = max(int(refresh_seconds), _refresh_interval_seconds(now))
 
-    # Calculate selection options outside the fragment so the multiselect is fully operational
-    threshold_yuan = min_flow * 1e8
-    filtered_rows = [row for row in snapshot_init.rows if abs(row.get("main_net_inflow", 0)) >= threshold_yuan]
-    
-    if not filtered_rows:
-        st.warning(f"当前过滤阈值过高，无累计主力净流入/流出绝对值 ≥ {min_flow} 亿元的板块，请调低过滤条件。")
-        return
-        
-    default_names = _pick_default_top_names(filtered_rows, top_n)
-    selected_names = st.multiselect(
-        f"选择要对比的板块（默认展示净流入前 {top_n} 个与后 {top_n} 个）",
-        options=[row["name"] for row in filtered_rows],
-        default=default_names,
-        key="fund_flow_selected_names_multiselect"
-    )
-
     # 使用 st.fragment 实现无感、无白屏局部刷新，并且通过 run_every 定期检查是否需要后台静默更新
     @st.fragment(run_every=refresh_interval)
     def render_content_fragment():
-        cache = st.session_state.get("fund_flow_cache")
-        now_ts = time.time()
+        # 1. 获取全局缓存中的 snapshot
+        snapshot = _get_cached_snapshot(sector_type, indicator, refresh_interval)
         
-        # Determine if we need to fetch data
-        need_fetch = False
-        if cache is None:
-            need_fetch = True
-        elif (cache["sector_type"] != sector_type or 
-              cache["indicator"] != indicator or 
-              cache["selected_names"] != selected_names):
-            need_fetch = True
-        elif now_ts - cache["last_updated"] >= refresh_interval:
-            need_fetch = True
-
-        if need_fetch and not st.session_state["fund_flow_is_fetching"]:
-            _trigger_async_fetch(sector_type, indicator, selected_names)
+        # 2. 从分片内部渲染侧边栏的过滤滑块与展示数量滑块
+        with st.sidebar:
+            # 动态计算最大值，作为过滤滑动条的上限（亿元）
+            max_val_yuan = max([abs(row.get("main_net_inflow", 0)) for row in snapshot.rows]) if snapshot.rows else 0
+            max_val_yi = float(math.ceil(max_val_yuan / 1e8))
+            max_slider_val = max(max_val_yi, 1.0)
             
-        # Display SWR stale-while-revalidate data (or loading info on first load)
-        if cache is not None and cache["snapshot"].indicator == indicator:
-            snapshot = cache["snapshot"]
-            klines = cache["klines"]
+            # 过滤不活跃板块滑块
+            min_flow_key = "fund_flow_min_flow"
+            init_min_flow = init_slider_state(min_flow_key, default_value=0.0, min_value=0.0, max_value=max_slider_val)
+            min_flow = st.slider(
+                "过滤不活跃板块 (绝对值 ≥ N 亿元)",
+                min_value=0.0,
+                max_value=max_slider_val,
+                value=init_min_flow,
+                step=0.5 if max_slider_val <= 50.0 else 1.0,
+                key=min_flow_key,
+                on_change=on_slider_change,
+                args=(min_flow_key,),
+                help="仅展示累计主力净流入/流出绝对值大于或等于该设定值的板块",
+            )
             
-            source_desc = "新浪财经 (备份源)" if snapshot.source_type == "sina" else "东方财富 (官方源)"
-            fetching_status = " (🔄 正在后台刷新...)" if st.session_state["fund_flow_is_fetching"] else ""
-            st.caption(f"数据来源：{source_desc}；分时曲线基于板块分钟级资金流明细，排行表支持今日/5日/10日口径。{fetching_status}")
+            # Top N 个板块滑块
+            top_n_key = "fund_flow_top_n"
+            init_top_n = init_slider_state(top_n_key, default_value=12, min_value=3, max_value=30)
+            top_n = st.slider(
+                "分时曲线展示前 N 个板块",
+                min_value=3,
+                max_value=30,
+                value=init_top_n,
+                step=1,
+                key=top_n_key,
+                on_change=on_slider_change,
+                args=(top_n_key,),
+            )
 
-            if klines:
-                trend_df = _build_trend_frame(klines)
-                used_kline_rows = int(trend_df.shape[0])
-                _render_metric_row(snapshot, used_kline_rows, top_n=int(top_n))
+        # 3. 计算符合过滤条件的板块
+        threshold_yuan = min_flow * 1e8
+        filtered_rows = [row for row in snapshot.rows if abs(row.get("main_net_inflow", 0)) >= threshold_yuan]
+        
+        if not filtered_rows:
+            st.warning(f"当前过滤阈值过高，无累计主力净流入/流出绝对值 ≥ {min_flow} 亿元的板块，请调低过滤条件。")
+            return
+            
+        default_names = _pick_default_top_names(filtered_rows, top_n)
+        
+        # 4. 动态更新对比板块选择（自动更新模式）
+        multiselect_key = "fund_flow_selected_names_multiselect"
+        current_selection = st.session_state.get(multiselect_key)
+        last_auto = st.session_state.get("fund_flow_last_auto_selected")
+        
+        # 判断全局分类或周期是否发生切换
+        prev_sector_type = st.session_state.get("fund_flow_prev_sector_type")
+        prev_indicator = st.session_state.get("fund_flow_prev_indicator")
+        is_options_changed = (prev_sector_type != sector_type or prev_indicator != indicator)
+        
+        if is_options_changed:
+            st.session_state["fund_flow_prev_sector_type"] = sector_type
+            st.session_state["fund_flow_prev_indicator"] = indicator
+            
+        if current_selection is None or last_auto is None or current_selection == last_auto or is_options_changed:
+            st.session_state[multiselect_key] = default_names
+            st.session_state["fund_flow_last_auto_selected"] = default_names
+            selected_names = default_names
+        else:
+            selected_names = current_selection
 
-                fig = _plot_sector_trend(trend_df, name_annotation="end")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("🔄 正在后台加载分时趋势曲线数据，请稍候...")
+        selected_names = st.multiselect(
+            f"选择要对比的板块（默认展示净流入前 {top_n} 个与后 {top_n} 个）",
+            options=[row["name"] for row in filtered_rows],
+            default=selected_names,
+            key=multiselect_key
+        )
 
-            tab_rank, tab_detail = st.tabs(["板块排行", "说明与口径"])
-            with tab_rank:
-                _render_rank_table(snapshot, selected_names)
-            with tab_detail:
-                st.markdown(
-                    """
+        # 5. 获取分时趋势的 K 线数据
+        klines = _get_cached_klines(snapshot, selected_names, refresh_interval)
+
+        # 6. 渲染页面内容
+        source_desc = "新浪财经 (备份源)" if snapshot.source_type == "sina" else "东方财富 (官方源)"
+        
+        is_fetching = False
+        with _GLOBAL_CACHE_LOCK:
+            is_fetching = any(n in _GLOBAL_FETCHING_SECTORS for n in selected_names) or (sector_type, indicator) in _GLOBAL_FETCHING_SNAPSHOTS
+        fetching_status = " (🔄 正在后台刷新...)" if is_fetching else ""
+        st.caption(f"数据来源：{source_desc}；分时曲线基于板块分钟级资金流明细，排行表支持今日/5日/10日口径。{fetching_status}")
+
+        valid_klines = {name: df for name, df in klines.items() if not df.empty}
+        if valid_klines:
+            trend_df = _build_trend_frame(valid_klines)
+            used_kline_rows = int(trend_df.shape[0])
+            _render_metric_row(snapshot, used_kline_rows, top_n=int(top_n))
+
+            fig = _plot_sector_trend(trend_df, name_annotation="end")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("🔄 正在加载分时趋势数据，请稍候...")
+
+        tab_rank, tab_detail = st.tabs(["板块排行", "说明与口径"])
+        with tab_rank:
+            _render_rank_table(snapshot, selected_names)
+        with tab_detail:
+            st.markdown(
+                """
 **页面逻辑说明**
 
 1. 左侧支持切换行业/概念/地域板块，以及今日、5日、10日三种口径。
@@ -913,9 +976,7 @@ def render_fund_flow_page() -> None:
 - 领涨/领跌股字段来自东方财富板块资金流排名接口原始返回。
 - 数据更新时间取自接口返回的最新时间戳，不一定等于页面刷新时间。
 """
-                )
-        else:
-            st.info("🔄 正在后台加载板块分时数据，请稍候...")
+            )
 
         logger.debug(
             "fund_flow_render_fragment sector_type=%s indicator=%s top_n=%s",
