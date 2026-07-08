@@ -1,8 +1,8 @@
 # 使用官方的 Python 基础镜像
 FROM python:3.13.1-slim
 
-# 安装 Node.js
-RUN apt-get update && apt-get install -y curl && \
+# 安装 Node.js 和编译工具
+RUN apt-get update && apt-get install -y curl build-essential && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
@@ -18,7 +18,7 @@ COPY . /app
 
 # 构建 Next.js 项目
 WORKDIR /app/nextjs
-RUN npm install
+RUN npm install --build-from-source=sqlite3
 RUN npm run build
 
 # 切回主工作目录
