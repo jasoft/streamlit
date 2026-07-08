@@ -6,6 +6,6 @@ service nginx start
 cd /app/nextjs
 npm start &
 
-# 切回主目录并启动 streamlit，运行在 8502 端口
+# 切回主目录并启动 streamlit，运行在 8502 端口，并关闭 CORS 以允许反向代理的 WebSocket 连接
 cd /app
-uv run streamlit run stockview/app.py --server.port 8502
+uv run streamlit run stockview/app.py --server.port 8502 --server.enableCORS false --server.enableXsrfProtection false
