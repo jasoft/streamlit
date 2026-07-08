@@ -22,7 +22,6 @@ if [ -f "${ENV_FILE}" ]; then
   DOCKER_HOST=ssh://docker docker run -d \
     --name ${APP_NAME} \
     -p 8501:8501 \
-    -p 3000:3000 \
     --env-file ${ENV_FILE} \
     --restart unless-stopped \
     ${APP_NAME}
@@ -31,9 +30,8 @@ else
   DOCKER_HOST=ssh://docker docker run -d \
     --name ${APP_NAME} \
     -p 8501:8501 \
-    -p 3000:3000 \
     --restart unless-stopped \
     ${APP_NAME}
 fi
 
-echo "Deployment completed. Service: http://docker.home:8501 and http://docker.home:3000"
+echo "Deployment completed. Service: http://docker.home:8501"

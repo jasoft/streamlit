@@ -63,7 +63,7 @@ export default function FundFlowPage() {
   }, [sectorType, indicator, topN, refreshInterval, isLoaded]);
 
   const { data, error, isValidating } = useSWR(
-    isLoaded ? `/api/fund-flow?type=${sectorType}&indicator=${indicator}&top_n=${topN}` : null,
+    isLoaded ? `/fundflow/api/fund-flow?type=${sectorType}&indicator=${indicator}&top_n=${topN}` : null,
     fetcher,
     { refreshInterval: refreshInterval * 1000, revalidateOnFocus: true }
   );

@@ -4,15 +4,19 @@ FROM ubuntu:24.04
 # 避免交互式提示
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 安装 Python 和 Node.js
+# 安装 Python、Node.js 和 Nginx
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     python3-venv \
     curl \
+    nginx \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# 设置 Nginx 配置
+COPY nginx.conf /etc/nginx/sites-available/default
 
 # 设置工作目录
 WORKDIR /app

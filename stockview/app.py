@@ -50,11 +50,7 @@ def main() -> None:
         import streamlit.components.v1 as components
         components.html(
             """
-            <iframe id="nextjs-iframe" width="100%" height="900px" style="border:none; margin:0; padding:0;"></iframe>
-            <script>
-                const host = window.location.hostname;
-                document.getElementById('nextjs-iframe').src = `http://${host}:3000`;
-            </script>
+            <iframe id="nextjs-iframe" src="/fundflow" width="100%" height="900px" style="border:none; margin:0; padding:0;"></iframe>
             """,
             height=900
         )
