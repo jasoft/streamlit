@@ -47,9 +47,16 @@ def main() -> None:
 
         render_hs300_industry_page()
     elif page == "实时板块资金流向":
-        from stockview.fund_flow import render_fund_flow_page
-
-        render_fund_flow_page()
+        import streamlit.components.v1 as components
+        components.html(
+            """
+            <script>
+                const host = window.location.hostname;
+                document.write(`<iframe src="http://${host}:3000" width="100%" height="900px" style="border:none; margin:0; padding:0;"></iframe>`);
+            </script>
+            """,
+            height=900
+        )
     elif page == "市场拥挤度":
         from stockview.congestion import render_congestion_page
 
