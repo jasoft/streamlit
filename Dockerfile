@@ -1,24 +1,32 @@
-# 使用官方的 Python 基础镜像
-FROM python:3.13.1-slim
+# 使用 Ubuntu 24.04 作为基础镜像 (包含更新的 glibc)
+FROM ubuntu:24.04
 
-# 安装 Node.js 和编译工具
-RUN apt-get update && apt-get install -y curl build-essential && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    rm -rf /var/lib/apt/lists/*
+# 避免交互式提示
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 安装 Python 和 Node.js
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    curl \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
 # 设置工作目录
 WORKDIR /app
 
 # 安装 uv
-RUN pip install --no-cache-dir uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
 # 复制当前目录内容到工作目录
 COPY . /app
 
 # 构建 Next.js 项目
 WORKDIR /app/nextjs
-RUN npm install --build-from-source=sqlite3
+RUN npm install
 RUN npm run build
 
 # 切回主工作目录
