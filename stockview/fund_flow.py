@@ -434,7 +434,8 @@ def _load_rank_snapshot(sector_type: str, indicator: str) -> FundFlowSnapshot:
         try:
             if not df.empty and "update_time" in df.columns:
                 ts_raw = int(df.iloc[0]["update_time"])
-                latest_ts = pd.to_datetime(ts_raw, unit="s", utc=True).tz_convert("Asia/Shanghai")
+                dt = pd.to_datetime(ts_raw, unit="s", utc=True)
+                latest_ts = dt.tz_convert("Asia/Shanghai")
         except Exception as e:  # noqa: BLE001
             logger.error("Failed to parse update_time: %s", e)
             latest_ts = _now_shanghai()
