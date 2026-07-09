@@ -105,13 +105,13 @@ def _fetch_sina_stock_list_raw(page: int = 1, num: int = 80, sort: str = "amount
         return []
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=180)
 def fetch_sina_stock_list(page: int = 1, num: int = 80, sort: str = "amount", asc: int = 0) -> list:
     """从新浪获取A股列表数据（带缓存）"""
     return _fetch_sina_stock_list_raw(page, num, sort, asc)
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=180)
 def fetch_all_sina_stocks() -> pd.DataFrame:
     """获取所有A股数据"""
     all_data = []
@@ -620,9 +620,9 @@ def streamlit_app():
     current_time = datetime.now()
     is_trading = during_market_time(current_time)
 
-    # 自动刷新：交易时间 60 秒，非交易时间 10 分钟（避免永久冻结）
+    # 自动刷新：交易时间 3 分钟，非交易时间 10 分钟（避免永久冻结/触发反爬）
     if is_trading:
-        st_autorefresh(interval=60000, key="data_refresh")
+        st_autorefresh(interval=180000, key="data_refresh")
     else:
         st_autorefresh(interval=600000, key="data_refresh_offhours")
 
