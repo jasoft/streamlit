@@ -644,72 +644,61 @@ def streamlit_app():
         if data is None:
             st.warning("暂无数据，请稍后刷新")
         else:
-            metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
-
-            with metrics_col1:
+            # 使用 horizontal=True + border=True 构建指标行
+            with st.container(horizontal=True, border=True):
                 avg_amount = data["数值"][9]
                 pred_amount = data["数值"][8]
                 if pred_amount is not None:
                     delta_vs_avg = pred_amount - avg_amount
-                    st.metric("预估成交额", f"{pred_amount:,}亿",
-                              delta=f"{delta_vs_avg:+,}亿 vs 5日均值",
+                    st.metric("预估成交额 (亿)", f"{pred_amount:,}",
+                              delta=f"{delta_vs_avg:+,} vs 5日均值",
                               delta_color="normal" if delta_vs_avg > 0 else "inverse")
                 else:
                     st.metric("预估成交额", "休市", delta="非交易日", delta_color="off")
 
-            with metrics_col2:
                 st.metric("上涨占比", f"{data['数值'][14]:.1f}%")
 
-            with metrics_col3:
                 st.metric("涨停数量", str(data["数值"][15]),
                           delta=f"-跌停 {data['数值'][16]}", delta_color="inverse")
 
-            with metrics_col4:
                 middle_change = data["数值"][11]
                 st.metric("中位数涨幅", f"{middle_change:.2f}%")
 
             col1, col2 = st.columns(2)
             with col1:
-                st.markdown("""
-                <style>
-                .index-progress { margin-bottom: 1rem; }
-                .index-progress .label { margin-bottom: 0.5rem; font-weight: 500; color: #333; }
-                .index-progress .value { font-size: 0.9rem; color: #666; margin-top: 0.3rem; text-align: right; }
-                </style>
-                """, unsafe_allow_html=True)
+                with st.container(border=True):
+                    st.markdown("#### :material/pie_chart: 指数成交占比")
+                    total = data["数值"][3]
+                    indices = [
+                        ("上证指数", data["数值"][0]), ("深证指数", data["数值"][1]),
+                        ("创业板", data["数值"][2]),
+                        ("中证1000", data["数值"][5] * total / 100),
+                        ("中证500", data["数值"][6] * total / 100),
+                        ("沪深300", data["数值"][7] * total / 100),
+                    ]
 
-                st.markdown("#### 💰 指数成交占比")
-                total = data["数值"][3]
-                indices = [
-                    ("上证指数", data["数值"][0]), ("深证指数", data["数值"][1]),
-                    ("创业板", data["数值"][2]),
-                    ("中证1000", data["数值"][5] * total / 100),
-                    ("中证500", data["数值"][6] * total / 100),
-                    ("沪深300", data["数值"][7] * total / 100),
-                ]
+                    for name, amount in indices:
+                        cols = st.columns([2, 8])
+                        with cols[0]:
+                            st.write(name)
+                        with cols[1]:
+                            percentage = (amount / total) * 100
+                            st.progress(percentage / 100)
+                            st.caption(f"{percentage:.1f}%")
 
-                for name, amount in indices:
-                    st.markdown('<div class="index-progress">', unsafe_allow_html=True)
-                    cols = st.columns([2, 8])
+                    st.divider()
+                    cols = st.columns(2)
                     with cols[0]:
-                        st.markdown(f'<div class="label">{name}</div>', unsafe_allow_html=True)
+                        st.metric("总成交额 (亿)", f"{data['数值'][3]:,}")
                     with cols[1]:
-                        percentage = (amount / total) * 100
-                        st.markdown(get_progress_html(percentage), unsafe_allow_html=True)
-                        st.markdown(f'<div class="value">{percentage:.1f}%</div>', unsafe_allow_html=True)
-                    st.markdown("</div>", unsafe_allow_html=True)
-
-                cols = st.columns(2)
-                with cols[0]:
-                    st.info(f"**总成交额**: {data['数值'][3]} 亿")
-                with cols[1]:
-                    st.info(f"**5日均值**: {data['数值'][9]} 亿")
+                        st.metric("5日均值 (亿)", f"{data['数值'][9]:,}")
 
             with col2:
-                st.markdown("#### 💡 情绪指标")
-                for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
-                    suffix = "%" if ("百分比" in item or "涨幅" in item) else ""
-                    st.metric(label=item, value=f"{value}{suffix}")
+                with st.container(border=True):
+                    st.markdown("#### :material/psychology: 情绪指标")
+                    for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
+                        suffix = "%" if ("百分比" in item or "涨幅" in item) else ""
+                        st.metric(label=item, value=f"{value}{suffix}")
 
     with tab2:
         st.markdown("### 🔥 龙头股活跃度分析")
