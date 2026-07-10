@@ -447,8 +447,8 @@ def top_n_stock_avg_price_change(n: int) -> tuple[float, float]:
     top_n = int(len(df) * n / 100)
     top_df = df_sorted.head(top_n)
 
-    # 加权平均 (使用成交额 amount 做权重)
-    weighted_avg = (top_df["changepercent"] * top_df["amount"]).sum() / top_df["amount"].sum() if top_df["amount"].sum() > 0 else 0
+    # 加权平均
+    weighted_avg = (top_df["changepercent"] * top_df["mktcap"]).sum() / top_df["mktcap"].sum() if top_df["mktcap"].sum() > 0 else 0
     # 算术平均（去掉涨幅超过31%的）
     simple_avg = top_df[top_df["changepercent"] < 31]["changepercent"].mean()
 
@@ -625,6 +625,10 @@ def streamlit_app():
         st_autorefresh(interval=180000, key="data_refresh")
     else:
         st_autorefresh(interval=600000, key="data_refresh_offhours")
+
+    if st.button("🔄 强制刷新", key="force_refresh"):
+        st.cache_data.clear()
+        st.rerun()
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["💹 成交量与情绪", "🏢 龙头股分析", "📈 收益差分析", "📊 指数月度对比", "🎯 IF/IM策略"])
 
