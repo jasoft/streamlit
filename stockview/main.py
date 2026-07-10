@@ -447,8 +447,8 @@ def top_n_stock_avg_price_change(n: int) -> tuple[float, float]:
     top_n = int(len(df) * n / 100)
     top_df = df_sorted.head(top_n)
 
-    # 加权平均
-    weighted_avg = (top_df["changepercent"] * top_df["mktcap"]).sum() / top_df["mktcap"].sum() if top_df["mktcap"].sum() > 0 else 0
+    # 加权平均 (使用成交额 amount 做权重)
+    weighted_avg = (top_df["changepercent"] * top_df["amount"]).sum() / top_df["amount"].sum() if top_df["amount"].sum() > 0 else 0
     # 算术平均（去掉涨幅超过31%的）
     simple_avg = top_df[top_df["changepercent"] < 31]["changepercent"].mean()
 
@@ -704,13 +704,8 @@ def streamlit_app():
             with col2:
                 st.markdown("#### 💡 情绪指标")
                 for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
-                    output = f"**{item}**: {value}"
-                    if any(keyword in item for keyword in ["百分比", "涨幅"]):
-                        output = output + "%"
-                    if value > 0:
-                        st.success(output)
-                    else:
-                        st.error(output)
+                    suffix = "%" if ("百分比" in item or "涨幅" in item) else ""
+                    st.metric(label=item, value=f"{value}{suffix}")
 
     with tab2:
         st.markdown("### 🔥 龙头股活跃度分析")
