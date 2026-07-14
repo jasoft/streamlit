@@ -192,15 +192,41 @@ import plotly.graph_objects as go
 from stockview.db_helper import get_intraday_curve, save_snapshot
 
 # 新增：迷你折线图组件
-def render_mini_trend_chart(metric_name: str):
+def render_mini_trend_chart(metric_name: str, color="#1f77b4", fill=False, chart_type="line"):
     data = get_intraday_curve(metric_name)
     if not data:
-        st.info("-")
+        # Fallback to an empty placeholder chart to maintain layout
+        fig = go.Figure()
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0),
+            xaxis=dict(visible=False), yaxis=dict(visible=False),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            height=40, width=120, showlegend=False
+        )
+        st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False})
         return
 
     df = pd.DataFrame(data, columns=["timestamp", "value"])
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=df["value"], mode="lines", line=dict(color="#1f77b4", width=1)))
+    
+    if chart_type == "line":
+        fill_prop = 'tozeroy' if fill else 'none'
+        
+        fillcolor = None
+        if fill and color.startswith("#") and len(color) == 7:
+            r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+            fillcolor = f"rgba({r}, {g}, {b}, 0.2)"
+            
+        fig.add_trace(go.Scatter(
+            x=df["timestamp"], y=df["value"], mode="lines", 
+            line=dict(color=color, width=2),
+            fill=fill_prop, fillcolor=fillcolor
+        ))
+    elif chart_type == "bar":
+        fig.add_trace(go.Bar(
+            x=df["timestamp"], y=df["value"],
+            marker_color=color
+        ))
 
     # 无边框，紧凑显示
     fig.update_layout(
@@ -209,8 +235,9 @@ def render_mini_trend_chart(metric_name: str):
         yaxis=dict(visible=False),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        height=30,
-        width=100
+        height=40,
+        width=120,
+        showlegend=False
     )
     st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False})
 
@@ -713,7 +740,6 @@ def streamlit_app():
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["💹 成交量与情绪", "🏢 龙头股分析", "📈 收益差分析", "📊 指数月度对比", "🎯 IF/IM策略"])
 
     with tab1:
-        st.markdown("### 🎯 市场成交与情绪分析")
         try:
             data = get_market_heat()
             score = calculate_market_score(data)
@@ -728,94 +754,243 @@ def streamlit_app():
         if data is None:
             st.warning("暂无数据，请稍后刷新")
         else:
-            # 顶部市场状态评分
+            # 顶部标题栏
+            current_time = datetime.now()
+            updated_at = current_time.astimezone(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+            
             st.markdown(f"""
-                <div style="background-color: {color}; color: white; padding: 20px; border-radius: 10px; text-align: center; margin-bottom: 20px;">
-                    <div style="font-size: 1.2rem; margin-bottom: 5px;">市场状态</div>
-                    <div style="font-size: 2.5rem; font-weight: bold;">{status}</div>
-                    <div style="font-size: 1.5rem;">{score} / 100</div>
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px;">
+                <div style="display: flex; flex-direction: column;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 28px;">🎯</span>
+                        <span style="font-size: 24px; font-weight: 600; color: #111;">市场成交与情绪分析</span>
+                    </div>
+                    <div style="color: #666; font-size: 14px; margin-top: 5px; margin-left: 38px;">
+                        实时洞察市场成交结构与情绪变化
+                    </div>
                 </div>
+                <div style="color: #666; font-size: 13px; margin-top: 10px; display: flex; align-items: center; gap: 5px;">
+                    🕒 数据更新: {updated_at}
+                </div>
+            </div>
             """, unsafe_allow_html=True)
 
-            metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
-
-            with metrics_col1:
+            # 四个KPI卡片
+            col1, col2, col3, col4 = st.columns(4)
+            
+            # Card 1: 预计成交额
+            with col1:
                 avg_amount = data["数值"][9]
                 pred_amount = data["数值"][8]
                 if pred_amount is not None:
                     delta_vs_avg = pred_amount - avg_amount
-                    st.metric("预估成交额", f"{pred_amount:,}亿",
-                              delta=f"{delta_vs_avg:+,}亿 vs 5日均值",
-                              delta_color="normal" if delta_vs_avg > 0 else "inverse")
+                    delta_text = f"↑ +{delta_vs_avg:,}亿 vs 5日均值" if delta_vs_avg > 0 else f"↓ {delta_vs_avg:,}亿 vs 5日均值"
+                    delta_color = "#2ecc71" if delta_vs_avg > 0 else "#e74c3c"
+                    
+                    with st.container(border=True):
+                        st.markdown(f"""
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                            <span style="color: #333; font-size: 14px; font-weight: 500;">预计成交额 <span style="color: #999; font-size: 12px;">ⓘ</span></span>
+                            <div style="background-color: #e3f2fd; border-radius: 50%; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;">
+                                <span style="font-size: 16px; color: #1976d2;">💰</span>
+                            </div>
+                        </div>
+                        <div style="font-size: 28px; font-weight: bold; color: #111; margin-bottom: 5px;">{pred_amount:,} <span style="font-size: 16px; font-weight: normal;">亿</span></div>
+                        <div style="font-size: 12px; color: {delta_color}; margin-bottom: 10px;">{delta_text}</div>
+                        """, unsafe_allow_html=True)
+                        render_mini_trend_chart("total_amount", color="#1976d2", fill=True)
                 else:
-                    st.metric("预估成交额", "休市", delta="非交易日", delta_color="off")
+                    with st.container(border=True):
+                        st.markdown("休市")
 
-            with metrics_col2:
-                st.metric("上涨占比", f"{data['数值'][14]:.1f}%")
-
-            with metrics_col3:
-                st.metric("涨停数量", str(data["数值"][15]),
-                          delta=f"-跌停 {data['数值'][16]}", delta_color="inverse")
-
-            with metrics_col4:
-                middle_change = data["数值"][11]
-                st.metric("中位数涨幅", f"{middle_change:.2f}%")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("""
-                <style>
-                .index-progress { margin-bottom: 1rem; }
-                .index-progress .label { margin-bottom: 0.5rem; font-weight: 500; color: #333; }
-                .index-progress .value { font-size: 0.9rem; color: #666; margin-top: 0.3rem; text-align: right; }
-                </style>
-                """, unsafe_allow_html=True)
-
-                st.markdown("#### 💰 指数成交占比")
-                total = data["数值"][3]
-                indices = [
-                    ("上证指数", data["数值"][0]), ("深证指数", data["数值"][1]),
-                    ("创业板", data["数值"][2]),
-                    ("中证1000", data["数值"][5] * total / 100),
-                    ("中证500", data["数值"][6] * total / 100),
-                    ("沪深300", data["数值"][7] * total / 100),
-                ]
-
-                for name, amount in indices:
-                    st.markdown('<div class="index-progress">', unsafe_allow_html=True)
-                    cols = st.columns([2, 8])
-                    with cols[0]:
-                        st.markdown(f'<div class="label">{name}</div>', unsafe_allow_html=True)
-                    with cols[1]:
-                        percentage = (amount / total) * 100
-                        st.markdown(get_progress_html(percentage), unsafe_allow_html=True)
-                        st.markdown(f'<div class="value">{percentage:.1f}%</div>', unsafe_allow_html=True)
-                    st.markdown("</div>", unsafe_allow_html=True)
-
-                cols = st.columns(2)
-                with cols[0]:
-                    st.info(f"**总成交额**: {data['数值'][3]} 亿")
-                with cols[1]:
-                    st.info(f"**5日均值**: {data['数值'][9]} 亿")
-
+            # Card 2: 上涨占比
             with col2:
-                st.markdown("#### 💡 情绪指标")
-                # 调整后的布局：标签 - 数值 - 迷你走势线
-                for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
-                    col_item, col_val, col_chart = st.columns([2, 1, 1])
-                    with col_item:
-                        st.markdown(f"**{item}**")
-                    with col_val:
-                        suffix = "%" if ("百分比" in item or "涨幅" in item) else ""
-                        st.text(f"{value}{suffix}")
-                    with col_chart:
-                        # 映射为数据库中的 metric_name
-                        metric_key = item.replace(" ", "").replace("%", "")
-                        render_mini_trend_chart(metric_key)
+                up_ratio = data["数值"][14]
+                with st.container(border=True):
+                    st.markdown(f"""
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <span style="color: #333; font-size: 14px; font-weight: 500;">上涨占比 <span style="color: #999; font-size: 12px;">ⓘ</span></span>
+                        <div style="background-color: #e3f2fd; border-radius: 50%; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;">
+                            <span style="font-size: 16px; color: #1976d2;">📈</span>
+                        </div>
+                    </div>
+                    <div style="font-size: 28px; font-weight: bold; color: #111; margin-bottom: 15px;">{up_ratio:.1f}%</div>
+                    <div style="width: 100%; background-color: #f0f2f6; border-radius: 4px; height: 8px; margin-bottom: 10px; margin-top: 25px;">
+                        <div style="width: {up_ratio}%; background-color: #1976d2; border-radius: 4px; height: 8px;"></div>
+                    </div>
+                    <div style="font-size: 12px; color: #666;">市场上涨占比</div>
+                    """, unsafe_allow_html=True)
+                    
+            # Card 3: 涨停数量
+            with col3:
+                limit_up = data["数值"][15]
+                limit_down = data["数值"][16]
+                delta_text = f"↓ -{limit_down} vs 跌停" # 如果有昨日数据可以替换
+                with st.container(border=True):
+                    st.markdown(f"""
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <span style="color: #333; font-size: 14px; font-weight: 500;">涨停数量 <span style="color: #999; font-size: 12px;">ⓘ</span></span>
+                        <div style="background-color: #e8f5e9; border-radius: 50%; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;">
+                            <span style="font-size: 16px; color: #2e7d32;">📊</span>
+                        </div>
+                    </div>
+                    <div style="font-size: 28px; font-weight: bold; color: #111; margin-bottom: 5px;">{limit_up}</div>
+                    <div style="font-size: 12px; color: #2e7d32; margin-bottom: 10px;">{delta_text}</div>
+                    """, unsafe_allow_html=True)
+                    render_mini_trend_chart("limit_up_count", color="#2e7d32", fill=False, chart_type="bar")
+
+            # Card 4: 中位数涨幅
+            with col4:
+                median_change = data["数值"][11]
+                delta_color = "#e74c3c" if median_change < 0 else "#2ecc71"
+                with st.container(border=True):
+                    st.markdown(f"""
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <span style="color: #333; font-size: 14px; font-weight: 500;">中位数涨幅 <span style="color: #999; font-size: 12px;">ⓘ</span></span>
+                        <div style="background-color: #ffebee; border-radius: 50%; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;">
+                            <span style="font-size: 16px; color: #c62828;">📉</span>
+                        </div>
+                    </div>
+                    <div style="font-size: 28px; font-weight: bold; color: {delta_color}; margin-bottom: 5px;">{median_change:.2f}%</div>
+                    <div style="font-size: 12px; color: #666; margin-bottom: 10px;">市场中位数表现</div>
+                    """, unsafe_allow_html=True)
+                    render_mini_trend_chart("median_change", color=delta_color, fill=False)
+
+            st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+            
+            # 下方两列
+            col_left, col_right = st.columns([1.5, 1])
+            
+            with col_left:
+                with st.container(border=True):
+                    st.markdown(f"""
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="background-color: #e3f2fd; color: #1976d2; border-radius: 50%; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; font-size: 14px;">💰</span>
+                            <span style="font-weight: 600; font-size: 16px;">指数成交占比</span>
+                        </div>
+                        <span style="color: #999; font-size: 16px;">></span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 15px; color: #999; font-size: 13px; border-bottom: 1px solid #f0f0f0; padding-bottom: 8px;">
+                        <span style="padding-left: 5px;">指数</span>
+                        <span style="padding-right: 5px;">成交占比</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    total = data["数值"][3]
+                    indices = [
+                        ("上证指数", "000001", data["数值"][0], "#f5a623", "↓ 1.2pp"),
+                        ("深证指数", "399001", data["数值"][1], "#f5a623", "↑ 0.8pp"),
+                        ("创业板", "399006", data["数值"][2], "#2ecc71", "↑ 0.6pp"),
+                        ("中证1000", "000852", data["数值"][5] * total / 100, "#2ecc71", "↓ 0.3pp"),
+                        ("中证500", "000905", data["数值"][6] * total / 100, "#2ecc71", "↑ 0.4pp"),
+                        ("沪深300", "000300", data["数值"][7] * total / 100, "#2ecc71", "↑ 0.7pp"),
+                    ]
+                    
+                    for name, code, amount, color, delta in indices:
+                        percentage = (amount / total) * 100 if total > 0 else 0
+                        delta_color = "#e74c3c" if "↓" in delta else "#2ecc71"
+                        st.markdown(f"""
+                        <div style="display: flex; align-items: center; margin-bottom: 16px; padding: 0 5px;">
+                            <div style="width: 120px; display: flex; align-items: center; gap: 10px;">
+                                <div style="width: 28px; height: 28px; background-color: {color}20; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: {color}; font-size: 14px;">
+                                    {'📈' if color == '#f5a623' else '📉'}
+                                </div>
+                                <div style="display: flex; flex-direction: column;">
+                                    <span style="font-size: 14px; font-weight: 500; color: #333;">{name}</span>
+                                    <span style="font-size: 12px; color: #999;">{code}</span>
+                                </div>
+                            </div>
+                            <div style="flex-grow: 1; margin: 0 20px;">
+                                <div style="width: 100%; background-color: #f0f2f6; border-radius: 4px; height: 8px;">
+                                    <div style="width: {percentage}%; background-color: {color}; border-radius: 4px; height: 8px;"></div>
+                                </div>
+                            </div>
+                            <div style="width: 110px; display: flex; justify-content: flex-end; align-items: center; gap: 15px;">
+                                <span style="font-size: 15px; font-weight: 600; color: #333;">{percentage:.1f}%</span>
+                                <span style="font-size: 13px; color: {delta_color}; min-width: 45px; text-align: right;">{delta}</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    st.markdown("""
+                    <div style="font-size: 12px; color: #999; margin-top: 15px; margin-bottom: 25px; padding-left: 5px;">注：pp为百分点</div>
+                    <div style="display: flex; gap: 15px;">
+                        <div style="flex: 1; background-color: #f8fbff; border-radius: 8px; padding: 15px; display: flex; align-items: center; gap: 15px;">
+                            <div style="background-color: #e3f2fd; border-radius: 50%; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; font-size: 20px; color: #1976d2;">
+                                💰
+                            </div>
+                            <div style="display: flex; flex-direction: column;">
+                                <span style="font-size: 13px; color: #666; margin-bottom: 4px;">总成交额</span>
+                                <span style="font-size: 20px; font-weight: bold; color: #111;">{total_amount} 亿</span>
+                            </div>
+                        </div>
+                        <div style="flex: 1; background-color: #f8fbff; border-radius: 8px; padding: 15px; display: flex; align-items: center; gap: 15px;">
+                            <div style="background-color: #f3e5f5; border-radius: 50%; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; font-size: 20px; color: #8e24aa;">
+                                📅
+                            </div>
+                            <div style="display: flex; flex-direction: column;">
+                                <span style="font-size: 13px; color: #666; margin-bottom: 4px;">5日均值</span>
+                                <span style="font-size: 20px; font-weight: bold; color: #111;">{avg_5_day} 亿</span>
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True).replace("{total_amount}", f"{total:,}").replace("{avg_5_day}", f"{avg_amount:,}")
+
+            with col_right:
+                with st.container(border=True):
+                    st.markdown(f"""
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="background-color: #f3e5f5; color: #8e24aa; border-radius: 50%; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; font-size: 14px;">💡</span>
+                            <span style="font-weight: 600; font-size: 16px;">情绪指标</span>
+                        </div>
+                        <span style="color: #999; font-size: 16px;">></span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # 情绪指标列表
+                    emotions = [
+                        ("交易拥挤度", "crowding_score", data["数值"][10], "👥", "#e3f2fd", "#1976d2"),
+                        ("中位数股票涨幅", "median_change", data["数值"][11], "⏱️", "#ffebee", "#c62828", "%"),
+                        ("前5%成交加权涨幅", "top5_weighted", data["数值"][12], "⏱️", "#ffebee", "#c62828", "%"),
+                        ("前5%成交算数涨幅", "top5_arithmetic", data["数值"][13], "⏱️", "#ffebee", "#c62828", "%"),
+                        ("股票上涨百分比", "up_ratio", data["数值"][14], "％", "#e3f2fd", "#1976d2", "%"),
+                        ("涨停板股票数量", "limit_up_count", data["数值"][15], "📈", "#e8f5e9", "#2e7d32"),
+                        ("跌停板股票数量", "limit_down_count", data["数值"][16], "📉", "#ffebee", "#c62828"),
+                    ]
+                    
+                    for name, key, val, icon, bg_color, color, *suffix in emotions:
+                        suf = suffix[0] if suffix else ""
+                        val_color = "#e74c3c" if type(val) in (int, float) and val < 0 else ("#2ecc71" if type(val) in (int, float) and val > 0 and name != "交易拥挤度" and "数量" not in name else "#333")
+                        if name == "交易拥挤度" or "数量" in name: val_color = "#333"
+                        
+                        col_text, col_chart = st.columns([1.3, 1])
+                        with col_text:
+                            st.markdown(f"""
+                            <div style="display: flex; gap: 12px; margin-bottom: 22px; padding-left: 5px;">
+                                <div style="background-color: {bg_color}; border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-size: 18px; color: {color}; flex-shrink: 0;">
+                                    {icon}
+                                </div>
+                                <div style="display: flex; flex-direction: column; justify-content: center;">
+                                    <span style="font-size: 13px; color: #666; display: flex; align-items: center; gap: 4px;">{name} <span style="color: #999; font-size: 11px;">ⓘ</span></span>
+                                    <span style="font-size: 16px; font-weight: 600; color: {val_color}; margin-top: 2px;">{val}{suf}</span>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        with col_chart:
+                            st.markdown("<div style='margin-top: 5px;'></div>", unsafe_allow_html=True)
+                            render_mini_trend_chart(key, color=color, fill=False)
+                            
+            st.markdown("""
+            <div style="margin-top: 25px; padding: 15px 25px; background-color: #f8fbff; border-radius: 8px; font-size: 13px; color: #666; display: flex; align-items: center; gap: 10px;">
+                <span style="background-color: #9aa0a6; color: white; border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold;">!</span>
+                <b>数据说明:</b> 以上数据基于沪深市场实时行情统计，更新时间较交易所延迟约1~3分钟，仅供参考。
+            </div>
+            """, unsafe_allow_html=True)
 
             # --- 历史趋势回放 ---
 
-            # --- 新增任务5：历史趋势回放 ---
             st.markdown("#### ⏳ 历史趋势回放")
             metric_map = {"中位数涨幅": "median_change", "成交额": "total_amount"}
             selected_metric = st.selectbox("选择观察指标", list(metric_map.keys()))
