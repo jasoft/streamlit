@@ -192,7 +192,8 @@ import plotly.graph_objects as go
 from stockview.db_helper import get_intraday_curve, save_snapshot
 
 # 新增：迷你折线图组件
-def render_mini_trend_chart(metric_name: str, color="#1f77b4", fill=False, chart_type="line"):
+def render_mini_trend_chart(metric_name: str, color="#1f77b4", fill=False, chart_type="line", unique_id=None):
+    chart_key = metric_name if unique_id is None else f"{metric_name}_{unique_id}"
     data = get_intraday_curve(metric_name)
     if not data:
         # Fallback to an empty placeholder chart to maintain layout
@@ -203,7 +204,7 @@ def render_mini_trend_chart(metric_name: str, color="#1f77b4", fill=False, chart
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             height=40, width=120, showlegend=False
         )
-        st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False}, key=f"empty_{metric_name}")
+        st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False}, key=f"empty_{chart_key}")
         return
 
     df = pd.DataFrame(data, columns=["timestamp", "value"])
@@ -239,7 +240,7 @@ def render_mini_trend_chart(metric_name: str, color="#1f77b4", fill=False, chart
         width=120,
         showlegend=False
     )
-    st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False}, key=metric_name)
+    st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False}, key=chart_key)
 
 
 def calculate_market_score(data: dict) -> int:
@@ -981,7 +982,7 @@ def streamlit_app():
                             """, unsafe_allow_html=True)
                         with col_chart:
                             st.markdown("<div style='margin-top: 5px;'></div>", unsafe_allow_html=True)
-                            render_mini_trend_chart(key, color=color, fill=False)
+                            render_mini_trend_chart(key, color=color, fill=False, unique_id="emotions")
                             
             st.markdown("""
             <div style="margin-top: 25px; padding: 15px 25px; background-color: #f8fbff; border-radius: 8px; font-size: 13px; color: #666; display: flex; align-items: center; gap: 10px;">
