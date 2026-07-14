@@ -188,7 +188,21 @@ def fetch_sina_minute_kline(symbol: str, period: int = 15, count: int = 96) -> l
     return _fetch_sina_minute_kline_raw(symbol, period, count)
 
 
+from stockview.db_helper import save_snapshot
+
 # ============ 业务逻辑函数 ============
+
+def calculate_market_score(data: dict) -> int:
+    """计算市场状态评分 (0-100)"""
+    try:
+        median_change = data["数值"][11]
+        limit_up = data["数值"][15]
+        limit_down = data["数值"][16]
+        score = 50 + median_change * 2 + (limit_up - limit_down) * 0.5
+        return max(0, min(100, int(score)))
+    except Exception as e:
+        logger.error(f"评分计算失败: {e}")
+        return 50
 
 def is_trade_date(check_date: date) -> bool:
     """判断是否是交易日（简化版：非周末）"""
@@ -515,8 +529,6 @@ def calculate_top_n_stocks_avg_market_value(n: int) -> tuple[float, float, int]:
 # ============ Streamlit 页面 ============
 
 def get_market_heat() -> dict:
-    """获取市场热度数据"""
-    logger.info("获取市场热度数据")
 
     sh_amount, sz_amount = get_a_amount()
     current_time = datetime.now()
@@ -575,7 +587,52 @@ def get_market_heat() -> dict:
             int(avg_market_value), top_stocks,
         ],
     }
+    # 计算市场评分
+    score = calculate_market_score(data)
+
+    # 保存快照到 SQLite（结构化落库）
+    try:
+        save_snapshot({
+            "total_amount": int(total_amount / 1e8),
+            "up_ratio": up_down_ratio,
+            "limit_up_count": limit_up_count,
+            "limit_down_count": limit_down_count,
+            "median_change": middle_price_change_value,
+            "crowding_score": crowdedness,
+            "index_distribution": [
+                {"code": "000001", "name": "上证指数", "amount_ratio": (int(sh_amount / 1e8)) / total_amount * 100},
+                {"code": "399001", "name": "深证指数", "amount_ratio": (int(sz_amount / 1e8)) / total_amount * 100},
+                {"code": "399006", "name": "创业板", "amount_ratio": cyb_ratio},
+                {"code": "000852", "name": "中证1000", "amount_ratio": zz1000_ratio},
+                {"code": "000905", "name": "中证500", "amount_ratio": zz500_ratio},
+                {"code": "000300", "name": "沪深300", "amount_ratio": hs300_ratio},
+            ],
+            "intraday": {
+                "total_amount": int(total_amount / 1e8),
+                "up_ratio": up_down_ratio,
+                "median_change": middle_price_change_value,
+                "limit_up_count": limit_up_count,
+                "crowding_score": crowdedness,
+            }
+        })
+    except Exception as e:
+        logger.error(f"快照存储失败: {e}")
+
     return data
+
+
+def get_market_status(score: int) -> tuple[str, str]:
+    """根据评分返回市场状态描述与颜色"""
+    if score < 20:
+        return "极度恐慌", "#e74c3c"
+    elif score < 40:
+        return "弱势震荡", "#e67e22"
+    elif score < 60:
+        return "中性平衡", "#f1c40f"
+    elif score < 80:
+        return "强势上涨", "#27ae60"
+    else:
+        return "过热追涨", "#d32f2f"
 
 
 def color_negative_red(val):
@@ -636,69 +693,108 @@ def streamlit_app():
         st.markdown("### 🎯 市场成交与情绪分析")
         try:
             data = get_market_heat()
+            score = calculate_market_score(data)
+            status, color = get_market_status(score)
         except Exception as e:
             logger.error(f"获取市场数据失败: {e}")
             st.error(f"获取数据失败: {e}")
             data = None
+            score = 0
+            status, color = "数据异常", "#666"
 
         if data is None:
             st.warning("暂无数据，请稍后刷新")
         else:
-            # 使用 horizontal=True + border=True 构建指标行
-            with st.container(horizontal=True, border=True):
+            # 顶部市场状态评分
+            st.markdown(f"""
+                <div style="background-color: {color}; color: white; padding: 20px; border-radius: 10px; text-align: center; margin-bottom: 20px;">
+                    <div style="font-size: 1.2rem; margin-bottom: 5px;">市场状态</div>
+                    <div style="font-size: 2.5rem; font-weight: bold;">{status}</div>
+                    <div style="font-size: 1.5rem;">{score} / 100</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
+
+            with metrics_col1:
                 avg_amount = data["数值"][9]
                 pred_amount = data["数值"][8]
                 if pred_amount is not None:
                     delta_vs_avg = pred_amount - avg_amount
-                    st.metric("预估成交额 (亿)", f"{pred_amount:,}",
-                              delta=f"{delta_vs_avg:+,} vs 5日均值",
+                    st.metric("预估成交额", f"{pred_amount:,}亿",
+                              delta=f"{delta_vs_avg:+,}亿 vs 5日均值",
                               delta_color="normal" if delta_vs_avg > 0 else "inverse")
                 else:
                     st.metric("预估成交额", "休市", delta="非交易日", delta_color="off")
 
+            with metrics_col2:
                 st.metric("上涨占比", f"{data['数值'][14]:.1f}%")
 
+            with metrics_col3:
                 st.metric("涨停数量", str(data["数值"][15]),
                           delta=f"-跌停 {data['数值'][16]}", delta_color="inverse")
 
+            with metrics_col4:
                 middle_change = data["数值"][11]
                 st.metric("中位数涨幅", f"{middle_change:.2f}%")
 
             col1, col2 = st.columns(2)
             with col1:
-                with st.container(border=True):
-                    st.markdown("#### :material/pie_chart: 指数成交占比")
-                    total = data["数值"][3]
-                    indices = [
-                        ("上证指数", data["数值"][0]), ("深证指数", data["数值"][1]),
-                        ("创业板", data["数值"][2]),
-                        ("中证1000", data["数值"][5] * total / 100),
-                        ("中证500", data["数值"][6] * total / 100),
-                        ("沪深300", data["数值"][7] * total / 100),
-                    ]
+                st.markdown("""
+                <style>
+                .index-progress { margin-bottom: 1rem; }
+                .index-progress .label { margin-bottom: 0.5rem; font-weight: 500; color: #333; }
+                .index-progress .value { font-size: 0.9rem; color: #666; margin-top: 0.3rem; text-align: right; }
+                </style>
+                """, unsafe_allow_html=True)
 
-                    for name, amount in indices:
-                        cols = st.columns([2, 8])
-                        with cols[0]:
-                            st.write(name)
-                        with cols[1]:
-                            percentage = (amount / total) * 100
-                            st.progress(percentage / 100)
-                            st.caption(f"{percentage:.1f}%")
+                st.markdown("#### 💰 指数成交占比")
+                total = data["数值"][3]
+                indices = [
+                    ("上证指数", data["数值"][0]), ("深证指数", data["数值"][1]),
+                    ("创业板", data["数值"][2]),
+                    ("中证1000", data["数值"][5] * total / 100),
+                    ("中证500", data["数值"][6] * total / 100),
+                    ("沪深300", data["数值"][7] * total / 100),
+                ]
 
-                    st.divider()
-                    cols = st.columns(2)
+                for name, amount in indices:
+                    st.markdown('<div class="index-progress">', unsafe_allow_html=True)
+                    cols = st.columns([2, 8])
                     with cols[0]:
-                        st.metric("总成交额 (亿)", f"{data['数值'][3]:,}")
+                        st.markdown(f'<div class="label">{name}</div>', unsafe_allow_html=True)
                     with cols[1]:
-                        st.metric("5日均值 (亿)", f"{data['数值'][9]:,}")
+                        percentage = (amount / total) * 100
+                        st.markdown(get_progress_html(percentage), unsafe_allow_html=True)
+                        st.markdown(f'<div class="value">{percentage:.1f}%</div>', unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                cols = st.columns(2)
+                with cols[0]:
+                    st.info(f"**总成交额**: {data['数值'][3]} 亿")
+                with cols[1]:
+                    st.info(f"**5日均值**: {data['数值'][9]} 亿")
 
             with col2:
-                with st.container(border=True):
-                    st.markdown("#### :material/psychology: 情绪指标")
-                    for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
-                        suffix = "%" if ("百分比" in item or "涨幅" in item) else ""
-                        st.metric(label=item, value=f"{value}{suffix}")
+                st.markdown("#### 💡 情绪指标")
+                for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
+                    suffix = "%" if ("百分比" in item or "涨幅" in item) else ""
+                    st.metric(label=item, value=f"{value}{suffix}")
+
+            # --- 新增任务5：历史趋势回放 ---
+            st.markdown("#### ⏳ 历史趋势回放")
+            metric_map = {"中位数涨幅": "median_change", "成交额": "total_amount"}
+            selected_metric = st.selectbox("选择观察指标", list(metric_map.keys()))
+
+            from stockview.db_helper import get_snapshot_history
+            hist = get_snapshot_history(metric_map[selected_metric])
+            if hist:
+                df_hist = pd.DataFrame(hist, columns=["timestamp", "value"])
+                df_hist["timestamp"] = pd.to_datetime(df_hist["timestamp"])
+                import plotly.express as px
+                fig = px.line(df_hist, x="timestamp", y="value", title=f"{selected_metric} 历史趋势")
+                st.plotly_chart(fig, use_container_width=True)
+
 
     with tab2:
         st.markdown("### 🔥 龙头股活跃度分析")
