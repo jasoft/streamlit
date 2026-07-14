@@ -203,7 +203,7 @@ def render_mini_trend_chart(metric_name: str, color="#1f77b4", fill=False, chart
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             height=40, width=120, showlegend=False
         )
-        st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False})
+        st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False}, key=f"empty_{metric_name}")
         return
 
     df = pd.DataFrame(data, columns=["timestamp", "value"])
@@ -239,7 +239,7 @@ def render_mini_trend_chart(metric_name: str, color="#1f77b4", fill=False, chart
         width=120,
         showlegend=False
     )
-    st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False})
+    st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False}, key=metric_name)
 
 
 def calculate_market_score(data: dict) -> int:
@@ -913,7 +913,7 @@ def streamlit_app():
                         </div>
                         """, unsafe_allow_html=True)
 
-                    st.markdown("""
+                    html_content = """
                     <div style="font-size: 12px; color: #999; margin-top: 15px; margin-bottom: 25px; padding-left: 5px;">注：pp为百分点</div>
                     <div style="display: flex; gap: 15px;">
                         <div style="flex: 1; background-color: #f8fbff; border-radius: 8px; padding: 15px; display: flex; align-items: center; gap: 15px;">
@@ -935,7 +935,8 @@ def streamlit_app():
                             </div>
                         </div>
                     </div>
-                    """, unsafe_allow_html=True).replace("{total_amount}", f"{total:,}").replace("{avg_5_day}", f"{avg_amount:,}")
+                    """.replace("{total_amount}", f"{total:,}").replace("{avg_5_day}", f"{avg_amount:,}")
+                    st.markdown(html_content, unsafe_allow_html=True)
 
             with col_right:
                 with st.container(border=True):
