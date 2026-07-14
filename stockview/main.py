@@ -188,9 +188,32 @@ def fetch_sina_minute_kline(symbol: str, period: int = 15, count: int = 96) -> l
     return _fetch_sina_minute_kline_raw(symbol, period, count)
 
 
-from stockview.db_helper import save_snapshot
+import plotly.graph_objects as go
+from stockview.db_helper import get_intraday_curve, save_snapshot
 
-# ============ 业务逻辑函数 ============
+# 新增：迷你折线图组件
+def render_mini_trend_chart(metric_name: str):
+    data = get_intraday_curve(metric_name)
+    if not data:
+        st.info("-")
+        return
+
+    df = pd.DataFrame(data, columns=["timestamp", "value"])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=df["value"], mode="lines", line=dict(color="#1f77b4", width=1)))
+
+    # 无边框，紧凑显示
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        height=30,
+        width=100
+    )
+    st.plotly_chart(fig, use_container_width=False, config={"displayModeBar": False})
+
 
 def calculate_market_score(data: dict) -> int:
     """计算市场状态评分 (0-100)"""
@@ -777,9 +800,20 @@ def streamlit_app():
 
             with col2:
                 st.markdown("#### 💡 情绪指标")
+                # 调整后的布局：标签 - 数值 - 迷你走势线
                 for item, value in zip(data["指标"][10:17], data["数值"][10:17]):
-                    suffix = "%" if ("百分比" in item or "涨幅" in item) else ""
-                    st.metric(label=item, value=f"{value}{suffix}")
+                    col_item, col_val, col_chart = st.columns([2, 1, 1])
+                    with col_item:
+                        st.markdown(f"**{item}**")
+                    with col_val:
+                        suffix = "%" if ("百分比" in item or "涨幅" in item) else ""
+                        st.text(f"{value}{suffix}")
+                    with col_chart:
+                        # 映射为数据库中的 metric_name
+                        metric_key = item.replace(" ", "").replace("%", "")
+                        render_mini_trend_chart(metric_key)
+
+            # --- 历史趋势回放 ---
 
             # --- 新增任务5：历史趋势回放 ---
             st.markdown("#### ⏳ 历史趋势回放")
