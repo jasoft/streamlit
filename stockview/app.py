@@ -29,6 +29,7 @@ def main() -> None:
             "市场拥挤度",
             "创业板成交占比",
             "实时板块资金流向",
+            "创业板ETF买卖信号",
             "使用说明",
         ],
         index=0,
@@ -54,6 +55,10 @@ def main() -> None:
             """,
             height=900
         )
+    elif page == "创业板ETF买卖信号":
+        from stockview.etf_signal import render_etf_signal_page
+
+        render_etf_signal_page()
     elif page == "市场拥挤度":
         from stockview.congestion import render_congestion_page
 
@@ -73,6 +78,7 @@ def main() -> None:
             - 市场拥挤度: 抓取乐咕乐股拥挤度页面并画双轴图
             - 创业板成交占比: 观察创业板占沪深总成交额比例
             - 实时板块资金流向: 行业/概念/地域资金流分时曲线、排行看板、自动刷新
+            - 创业板ETF买卖信号: 趋势/动量/量能/成分股宽度/消息情绪五因子合成 -100~+100 评分与七档评级, 盘中60秒自动刷新
             """
         )
 
