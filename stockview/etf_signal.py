@@ -103,33 +103,47 @@ class RealtimeQuote:
         return self.change_pct if self.change_pct == self.change_pct else 0.0
 
 
+def _parse_tencent_payload(payload: str) -> Dict[str, RealtimeQuote]:
+    """解析腾讯行情响应.
+
+    腾讯返回形如 ``v_sz159915="51~名称~159915~..."``；必须用左侧 ``v_sz159915``
+    作为带交易所前缀的 key，不能只用字段里的六位数字代码。
+    """
+    result: Dict[str, RealtimeQuote] = {}
+    for line in payload.strip().split(";"):
+        if "=" not in line or '"' not in line:
+            continue
+        symbol = line[: line.index("=")].strip().removeprefix("v_")
+        fields = line[line.index('"') + 1 : line.rindex('"')].split("~")
+        if not symbol or len(fields) < 38:
+            continue
+        try:
+            quote = RealtimeQuote(
+                code=symbol,
+                name=fields[1],
+                price=float(fields[3] or 0),
+                prev_close=float(fields[4] or 0),
+                open_=float(fields[5] or 0),
+                high=float(fields[33] or 0),
+                low=float(fields[34] or 0),
+                volume=float(fields[36] or 0),
+                amount=float(fields[37] or 0),
+                change_pct=float(fields[32] or 0),
+                time_text=fields[30],
+            )
+        except (ValueError, IndexError):
+            continue
+        result[symbol] = quote
+    return result
+
+
 def fetch_tencent_realtime(codes: List[str]) -> Dict[str, RealtimeQuote]:
     """批量拉取腾讯实时行情."""
     url = "https://qt.gtimg.cn/q=" + ",".join(codes)
-    result: Dict[str, RealtimeQuote] = {}
     resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
     resp.encoding = "gbk"
-    for line in resp.text.strip().split(";"):
-        if "=" not in line or '"' not in line:
-            continue
-        fields = line[line.index('"') + 1 : line.rindex('"')].split("~")
-        if len(fields) < 38:
-            continue
-        quote = RealtimeQuote(
-            code=fields[2],
-            name=fields[1],
-            price=float(fields[3] or 0),
-            prev_close=float(fields[4] or 0),
-            open_=float(fields[5] or 0),
-            high=float(fields[33] or 0),
-            low=float(fields[34] or 0),
-            volume=float(fields[36] or 0),
-            amount=float(fields[37] or 0),
-            change_pct=float(fields[32] or 0),
-            time_text=fields[30],
-        )
-        result[quote.code] = quote
-    return result
+    return _parse_tencent_payload(resp.text)
 
 
 @st.cache_data(ttl=120, show_spinner=False)

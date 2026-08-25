@@ -9,6 +9,7 @@ import pandas as pd
 from stockview.etf_signal import (
     FACTOR_WEIGHTS,
     RealtimeQuote,
+    _parse_tencent_payload,
     composite_signal,
     compute_breadth_factor,
     compute_ma_alignment_score,
@@ -48,6 +49,29 @@ def uptrend(n: int = 60) -> pd.DataFrame:
 
 def downtrend(n: int = 60) -> pd.DataFrame:
     return make_daily([16 - i * 0.1 for i in range(n)])
+
+
+class TestTencentParser(unittest.TestCase):
+    def test_prefixed_symbol_is_used_as_key(self) -> None:
+        payload = (
+            'v_sz159915="51~创业板ETF易方达~159915~3.411~3.457~3.404~6514150~'
+            '3008375~3477131~3.411~2367~3.410~13289~3.409~13468~3.408~5580~'
+            '3.407~12277~3.413~32118~3.414~13783~3.415~3060~3.416~3932~3.417~'
+            '4528~~20260825100033~-0.046~-1.33~3.425~3.376~'
+            '3.411/6514150/2214471302~6514150~221447~3.56";'
+        )
+        quotes = _parse_tencent_payload(payload)
+        self.assertIn("sz159915", quotes)
+        q = quotes["sz159915"]
+        self.assertEqual(q.name, "创业板ETF易方达")
+        self.assertAlmostEqual(q.price, 3.411)
+        self.assertAlmostEqual(q.change_pct, -1.33)
+        self.assertAlmostEqual(q.high, 3.425)
+        self.assertAlmostEqual(q.low, 3.376)
+        self.assertEqual(q.time_text, "20260825100033")
+
+    def test_invalid_lines_are_skipped(self) -> None:
+        self.assertEqual(_parse_tencent_payload("bad line;"), {})
 
 
 class TestMergeRealtimeBar(unittest.TestCase):
