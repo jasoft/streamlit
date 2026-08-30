@@ -8,3 +8,5 @@ __pycache__
 stockview/stockview.log
 .env.production
 stockview/.slider_state.json
+.env
+.cache/

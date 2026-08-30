@@ -18,4 +18,6 @@ dependencies = [
     "streamlit>=1.43.2",
     "mootdx>=0.11.7",
     "eltdx>=3.0.9",
+    "tqsdk>=3.10.2",
+    "mini-racer>=0.12.4",
 ]
