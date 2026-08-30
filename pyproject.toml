@@ -16,4 +16,6 @@ dependencies = [
     "pytz>=2025.1",
     "streamlit-autorefresh>=1.0.1",
     "streamlit>=1.43.2",
+    "mootdx>=0.11.7",
+    "eltdx>=3.0.9",
 ]

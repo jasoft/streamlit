@@ -1,11 +1,8 @@
 import altair as alt
-import akshare
 import pandas as pd
 import streamlit as st
 
-from stockview.akcache import CacheWrapper
-
-ak = CacheWrapper(akshare, cache_time=180)
+from stockview.tdx_source import fetch_index_daily
 
 SYMBOL_SH = "sh000001"
 SYMBOL_SZ = "sz399001"
@@ -14,14 +11,13 @@ SYMBOL_CYB = "sz399006"
 
 # Fetch data for the indices, data format:
 
-#   date	    open	close	high	low	    amount	    amount
-# 0	1991-04-03	988.05	988.05	988.05	988.05	1	        1.000000e+04
+#   date	    open	close	high	low	    volume	    amount
 
 @st.cache_data(ttl=180)
 def build_cyb_ratio_dataframe(lookback_days: int = 250) -> pd.DataFrame:
-    df_sh = ak.stock_zh_index_daily_em(SYMBOL_SH).tail(lookback_days).copy()
-    df_sz = ak.stock_zh_index_daily_em(SYMBOL_SZ).tail(lookback_days).copy()
-    df_cyb = ak.stock_zh_index_daily_em(SYMBOL_CYB).tail(lookback_days).copy()
+    df_sh = fetch_index_daily(SYMBOL_SH, count=lookback_days).tail(lookback_days).copy()
+    df_sz = fetch_index_daily(SYMBOL_SZ, count=lookback_days).tail(lookback_days).copy()
+    df_cyb = fetch_index_daily(SYMBOL_CYB, count=lookback_days).tail(lookback_days).copy()
 
     df_sh["date"] = pd.to_datetime(df_sh["date"]).dt.date
     df_sz["date"] = pd.to_datetime(df_sz["date"]).dt.date

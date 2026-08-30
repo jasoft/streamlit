@@ -1,7 +1,7 @@
 """创业板 ETF 多因子买卖信号面板.
 
 数据源:
-- 日线历史: 新浪 (akshare.fund_etf_hist_sina / ak.stock_zh_index_daily)
+- 日线历史: 通达信协议 (stockview.tdx_source, 替代原新浪源, 稳定不被封)
 - 盘中实时: 腾讯行情 qt.gtimg.cn (批量、稳定)
 - 财经快讯: 新浪全球财经快讯 (akshare.stock_info_global_sina)
 - 成分股权重: 内置快照, 面板中可编辑校准
@@ -34,6 +34,9 @@ except Exception:  # pragma: no cover
     ak = None
 
 import streamlit as st
+
+from stockview.tdx_source import fetch_etf_daily as _fetch_etf_daily_raw
+from stockview.tdx_source import fetch_index_daily as _fetch_index_daily_raw
 
 SH_TZ = dt.timezone(dt.timedelta(hours=8))
 
@@ -148,14 +151,14 @@ def fetch_tencent_realtime(codes: List[str]) -> Dict[str, RealtimeQuote]:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_etf_daily_cached(symbol: str = ETF_CODE) -> pd.DataFrame:
-    df = ak.fund_etf_hist_sina(symbol=symbol)
+    df = _fetch_etf_daily_raw(symbol)
     df["date"] = pd.to_datetime(df["date"])
     return df.sort_values("date").reset_index(drop=True)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_index_daily_cached(symbol: str = INDEX_CODE) -> pd.DataFrame:
-    df = ak.stock_zh_index_daily(symbol=symbol)
+    df = _fetch_index_daily_raw(symbol)
     df["date"] = pd.to_datetime(df["date"])
     return df.sort_values("date").reset_index(drop=True)
 

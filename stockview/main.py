@@ -334,55 +334,30 @@ def get_estimate_amount(minutes: int, vol: float = None) -> int:
 
 @st.cache_data(ttl=3600)
 def get_n_day_avg_amount(n: int) -> int:
-    """获取最近n个交易日的平均成交额（使用新浪源历史数据）
+    """获取最近n个交易日的平均成交额（使用通达信协议历史数据）
 
-    使用AKShare新浪源获取上证指数和深证成指的历史K线数据，
-    通过实时成交额与成交量的比值来估算历史成交额。
-
-    新浪源volume单位是手（100股），腾讯API volume单位是股。
-    转换公式：股 = 手 / 100
+    通达信指数日K自带每日成交额（元），直接取最近n日均值，
+    与实时成交额（腾讯源，单位元）口径一致。
     """
     logger.info(f"获取最近 {n} 个交易日的平均成交额")
     try:
-        import akshare as ak
+        from stockview.tdx_source import fetch_index_daily
 
-        # 先获取实时数据作为基准
-        sh_amount, sz_amount = get_a_amount()
-        sh_quotes = fetch_tencent_quotes("sh000001")
-        sz_quotes = fetch_tencent_quotes("sz399001")
-
-        # 获取实时成交量（股）
-        sh_real_volume = sh_quotes.get("000001", {}).get("volume", 0)
-        sz_real_volume = sz_quotes.get("399001", {}).get("volume", 0)
-
-        if sh_real_volume == 0 or sz_real_volume == 0:
-            logger.warning("实时成交量为0，返回实时成交额")
-            return int(sh_amount + sz_amount)
-
-        # 计算转换系数：成交额 / 成交量（元/股）
-        sh_price_per_share = sh_amount / sh_real_volume if sh_real_volume > 0 else 0
-        sz_price_per_share = sz_amount / sz_real_volume if sz_real_volume > 0 else 0
-
-        # 新浪源获取历史数据
-        sh_df = ak.stock_zh_index_daily(symbol="sh000001")
-        sz_df = ak.stock_zh_index_daily(symbol="sz399001")
+        sh_df = fetch_index_daily("sh000001", count=n + 5)
+        sz_df = fetch_index_daily("sz399001", count=n + 5)
 
         if sh_df.empty or sz_df.empty:
-            logger.warning("新浪源返回空数据，返回实时成交额")
+            logger.warning("通达信源返回空数据，返回实时成交额")
+            sh_amount, sz_amount = get_a_amount()
             return int(sh_amount + sz_amount)
 
-        # 取最近n个交易日
-        sh_recent = sh_df.tail(n)
-        sz_recent = sz_df.tail(n)
-
-        # 新浪源volume单位是手（100股），需要除以100转换为股
-        # 成交额 = 股数 * 每股价格
-        sh_avg_amount = (sh_recent['volume'] / 100 * sh_price_per_share).mean()
-        sz_avg_amount = (sz_recent['volume'] / 100 * sz_price_per_share).mean()
+        # 多取5根兜底除权/停市边界, 取最近n个交易日
+        sh_avg_amount = sh_df["amount"].astype(float).tail(n).mean()
+        sz_avg_amount = sz_df["amount"].astype(float).tail(n).mean()
 
         total_avg = int(sh_avg_amount + sz_avg_amount)
 
-        logger.info(f"最近{n}日平均成交额: {total_avg/1e8:.0f}亿 (基于新浪源历史数据)")
+        logger.info(f"最近{n}日平均成交额: {total_avg/1e8:.0f}亿 (基于通达信源历史数据)")
         return total_avg
 
     except Exception as e:
