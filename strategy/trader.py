@@ -277,7 +277,9 @@ def run_once(name: str, cfg: dict, dry_run: bool | None = None) -> dict:
     summary["orders"] = orders
     for o in orders:
         res = execute(o, dry_run=dry)
-        if res["ok"]:
+        # dry-run 模式下始终记账 (即使同花顺客户端没打开, 也先记 dry 状态, 便于链路测试)
+        # 真实模式只在执行成功后记账
+        if dry or res["ok"]:
             record(name, [o], dry_run=dry)
         summary["executed"].append({**o, "ok": res["ok"],
                                     "msg": (res["stdout"] or res["stderr"])[-300:]})

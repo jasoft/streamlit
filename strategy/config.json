@@ -22,6 +22,13 @@
                  "vwap_band": 0.003, "surge": 0.015, "stale_min": 20},
       "cash_per_symbol": 10000,
       "live": {"dry_run": true, "execute_time": "14:50", "qfq": false, "poll_seconds": 60}
+    },
+    "tick_buy_sell": {
+      "enabled": true,
+      "symbols": ["sz159915"],
+      "params": {"switch_every": 2},
+      "cash_per_symbol": 10000,
+      "live": {"dry_run": true, "execute_time": "14:55", "qfq": false, "poll_seconds": 5}
     }
   }
 }
