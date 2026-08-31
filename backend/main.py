@@ -138,12 +138,12 @@ class BacktestReq(BaseModel):
 
 
 @app.post("/api/backtest")
-def run_backtest(req: BacktestReq):
+async def run_backtest(req: BacktestReq):
     strat = registry.get(req.strategy)
     tf = getattr(strat, "TIMEFRAME", "day")
     out = {}
     for symbol in req.symbols:
-        df = _fetch(symbol, req.qfq, tf, limit=3000)
+        df = await asyncio.to_thread(_fetch, symbol, req.qfq, tf, 3000)
         target = strat.target_position(df, req.params)
         r = backtest(df, target, cash=req.cash)
         # 只传必要数据: stats + equity (资金曲线) + markers (买卖点) + df 列 (收盘价+日期)
@@ -170,10 +170,10 @@ def stop_strategy(name: str):
 
 
 @app.post("/api/strategies/{name}/run-once")
-def run_once(name: str):
+async def run_once(name: str):
     strats = registry.discover()
     cfg = config_mod.load(strats)
-    summary = trader.run_once(name, cfg["strategies"][name], dry_run=True)
+    summary = await asyncio.to_thread(trader.run_once, name, cfg["strategies"][name], True)
     return summary
 
 
@@ -184,10 +184,10 @@ def get_evals(name: str, tail: int = 60):
 
 
 @app.get("/api/positions")
-def get_positions():
+async def get_positions():
     """同花顺实际持仓 (subprocess ths_trade)."""
     cmd = [sys.executable, str(REPO_ROOT / "scripts" / "ths_trade.py"), "positions"]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    r = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=120)
     try:
         return json.loads(r.stdout)
     except Exception:
@@ -195,14 +195,14 @@ def get_positions():
 
 
 @app.get("/api/quote/{symbol}")
-def get_quote(symbol: str):
-    return trader.fetch_quote_snapshot(symbol)
+async def get_quote(symbol: str):
+    return await asyncio.to_thread(trader.fetch_quote_snapshot, symbol)
 
 
 @app.get("/api/intraday/{symbol}")
-def get_intraday(symbol: str):
+async def get_intraday(symbol: str):
     """当日 1m K 线 + VWAP + MACD + 昨收 — 前端首次加载全量, 后续走 WS 增量."""
-    df, pre_close = fetch_intraday_1m(symbol)
+    df, pre_close = await asyncio.to_thread(fetch_intraday_1m, symbol)
     if len(df) == 0:
         return {"symbol": symbol, "pre_close": pre_close, "bars": []}
 
@@ -270,16 +270,19 @@ _ws_mgr = ConnectionManager()
 
 
 async def _tick_loop(symbols: list[str]):
-    """后台循环: 每秒拉一次 eltdx, 广播给订阅了对应 symbol 的 WebSocket."""
+    """后台循环: 每秒拉一次 eltdx, 广播给订阅了对应 symbol 的 WebSocket.
+
+    关键: eltdx 是同步阻塞 TCP 客户端, 必须用 asyncio.to_thread 包一层
+    否则会卡住整个事件循环, 导致 REST API 请求无法响应.
+    """
     import time as _time
-    loop_count = 0
     while True:
-        loop_count += 1
         t0 = _time.perf_counter()
         for symbol in symbols:
             try:
-                df, pre_close = fetch_intraday_1m(symbol)
-                snp = fetch_quote_snapshot(symbol)
+                # 在线程池中运行阻塞的 eltdx 调用, 不阻塞事件循环
+                df, pre_close = await asyncio.to_thread(fetch_intraday_1m, symbol)
+                snp = await asyncio.to_thread(fetch_quote_snapshot, symbol)
 
                 if len(df) == 0:
                     continue
