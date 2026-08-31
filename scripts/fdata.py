@@ -409,9 +409,9 @@ def _tq_levels(prices, vols, ref):
     return out
 
 
-def _tq_rows(symbols, api) -> list:
+def _tq_rows(symbols, api, wait_s: float = 10) -> list:
     quotes = [api.get_quote(s) for s in symbols]
-    api.wait_update(deadline=time.time() + 10)
+    api.wait_update(deadline=time.time() + wait_s)
     rows = []
     for q in quotes:
         last = _nan(q.last_price)
@@ -475,10 +475,6 @@ def _tq_rows(symbols, api) -> list:
 #               11买量 12卖量 13持仓 14成交量 15交易所(沪/连/郑/能) 16品种 17日期
 # 金融(CFFEX)布局: 0开 1高 2低 3最新 4成交量 5成交额 6持仓 7最新 8- 9涨停 10跌停
 #               13昨结 14昨收 16买价 17买量 26卖价 27卖量 38日期 39时间 40乘数 尾部名称
-_SINA_FUT_HEADERS = {
-    "Referer": "https://finance.sina.com.cn",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-}
 _EXCH_TAG = {"沪": "SHFE", "连": "DCE", "郑": "CZCE", "能": "INE", "广": "GFEX"}
 
 
@@ -491,7 +487,7 @@ def _sina_fut_rows(symbols) -> list:
         r = _resolve_fut(s)
         nf_syms.append(r[1] if r else s.upper())
     url = "https://hq.sinajs.cn/list=" + ",".join(f"nf_{s}" for s in nf_syms)
-    r = requests.get(url, headers=_SINA_FUT_HEADERS, timeout=5)
+    r = _http().get(url, timeout=5)
     r.encoding = "gbk"
     if r.status_code != 200:
         raise RuntimeError(f"sina http {r.status_code}")
@@ -651,17 +647,29 @@ def cmd_futspot(args) -> None:
 # 10涨停 11跌停 12-21卖五档(价五..价一/量五..量一) 22-31买五档(价一..价五)
 # 32时间 36标的 37合约简称 38振幅 39最高 40最低 41成交量 42成交额
 # 43M 44昨结算 45C/P 46到期日
-_CON_OP_HEADERS = {
+_SINA_HEADERS = {
     "Referer": "https://finance.sina.com.cn",
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
 }
 
 
-def _con_op_rows(codes) -> list:
-    import requests
+_HTTP = None
 
+
+def _http():
+    """进程内共享 requests.Session (复用 TCP/TLS 连接, watch 常驻轮询必需)."""
+    global _HTTP
+    if _HTTP is None:
+        import requests
+
+        _HTTP = requests.Session()
+        _HTTP.headers.update(_SINA_HEADERS)
+    return _HTTP
+
+
+def _con_op_rows(codes) -> list:
     url = "https://hq.sinajs.cn/list=" + ",".join(f"CON_OP_{c}" for c in codes)
-    r = requests.get(url, headers=_CON_OP_HEADERS, timeout=5)
+    r = _http().get(url, timeout=5)
     r.encoding = "gbk"
     if r.status_code != 200:
         raise RuntimeError(f"sina http {r.status_code}")
@@ -1038,6 +1046,134 @@ def cmd_weight(args) -> None:
     out({"source": "akshare-csindex", "count": len(df), "data": _df_records(df)})
 
 
+# ------------------------------------------------------------------ watch ----
+
+def cmd_watch(args) -> None:
+    """常驻轮询: 长连接复用, 每个 tick 调用策略文件的 on_tick(quotes) 回调."""
+    import importlib.util
+
+    strategy = None
+    if args.strategy:
+        spec = importlib.util.spec_from_file_location("fdata_strategy", args.strategy)
+        strategy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(strategy)
+        if not hasattr(strategy, "on_tick"):
+            die(f"策略文件缺少 on_tick(quotes) 函数: {args.strategy}")
+
+    # 路由 (基金净值是 T-1 数据, 不支持 tick)
+    buckets = {"tdx": [], "sina_fut": [], "tq": [], "sina_opt": []}
+    for raw in args.codes:
+        c = raw.strip()
+        if re.fullmatch(r"(?:of:|)(\d{6})\.of", c.lower()) or re.fullmatch(r"of:(\d{6})", c.lower()):
+            die("基金净值是 T-1 数据, 不支持 tick 轮询")
+        if len(c) == 8 and c.isdigit():
+            buckets["sina_opt"].append(c)
+        elif re.fullmatch(r"[a-zA-Z]{2}\d{6}", c) or (len(c) == 6 and c.isdigit()):
+            buckets["tdx"].append(_norm_code(c))
+        elif _is_option_code(c) or "@" in c or "." in c:
+            buckets["tq"].append(_tq_symbol(c))
+        elif re.fullmatch(r"[A-Za-z]+\d{0,4}", c):
+            buckets["sina_fut"].append(c)
+        else:
+            die(f"无法识别的代码: {c}")
+    if not any(buckets.values()):
+        die("请提供至少一个代码")
+
+    client = None
+    api = None
+    log_f = open(args.log, "a", encoding="utf-8") if args.log else None
+    n_cycles = n_signals = 0
+    t_start_all = time.time()
+
+    def _fetch_tdx():
+        nonlocal client
+        if client is None:
+            client = _tdx()
+        return _eltdx_rows(buckets["tdx"], client)
+
+    def _fetch_tq():
+        nonlocal api
+        if api is None:
+            with _hush():
+                api = _tq_api()
+        return _tq_rows(buckets["tq"], api, wait_s=args.interval)
+
+    try:
+        cycle = 0
+        while args.cycles <= 0 or cycle < args.cycles:
+            cycle += 1
+            t0 = time.time()
+            quotes, feed_errors = [], []
+            for name, fetch in (
+                ("eltdx", lambda: _fetch_tdx()),
+                ("sina-fut", lambda: _sina_fut_rows(buckets["sina_fut"])),
+                ("sina-etfopt", lambda: _con_op_rows(buckets["sina_opt"])),
+                ("tqsdk", lambda: _fetch_tq()),
+            ):
+                if not {
+                    "eltdx": buckets["tdx"],
+                    "sina-fut": buckets["sina_fut"],
+                    "sina-etfopt": buckets["sina_opt"],
+                    "tqsdk": buckets["tq"],
+                }[name]:
+                    continue
+                try:
+                    quotes.extend(fetch())
+                except Exception as e:  # noqa: BLE001
+                    feed_errors.append({"source": name, "error": f"{type(e).__name__}: {e}"})
+                    if name == "eltdx":  # 连接可能失效, 下轮重建
+                        try:
+                            client.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        client = None
+
+            signals = []
+            if strategy:
+                try:
+                    import inspect
+
+                    if len(inspect.signature(strategy.on_tick).parameters) >= 2:
+                        signals = strategy.on_tick(quotes, feed_errors) or []
+                    else:
+                        signals = strategy.on_tick(quotes) or []
+                except Exception as e:  # noqa: BLE001
+                    feed_errors.append({"source": "strategy", "error": f"{type(e).__name__}: {e}"})
+            n_cycles += 1
+            n_signals += len(signals)
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            for sig in signals:
+                line = json.dumps({"ts": ts, "signal": sig}, ensure_ascii=False, default=str)
+                print(f"[SIG] {line}", file=_REAL_STDOUT, flush=True)
+                if log_f:
+                    log_f.write(line + "\n")
+                    log_f.flush()
+            if feed_errors:
+                print(f"[ERR] {ts} {json.dumps(feed_errors, ensure_ascii=False)}",
+                      file=sys.stderr, flush=True)
+            if args.verbose or args.cycles == 1:
+                prices = {q["code"]: q["quote"]["last"] for q in quotes}
+                print(f"[TICK] {ts} #{cycle} {round((time.time()-t0)*1000)}ms {prices}"
+                      f" signals={len(signals)} errors={len(feed_errors)}",
+                      file=_REAL_STDOUT, flush=True)
+            rest = args.interval - (time.time() - t0)
+            if rest > 0:
+                time.sleep(rest)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if client:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if log_f:
+            log_f.close()
+        summary = {"cycles": n_cycles, "signals": n_signals,
+                   "elapsed_s": round(time.time() - t_start_all, 1)}
+        print(f"[DONE] {json.dumps(summary, ensure_ascii=False)}", file=_REAL_STDOUT, flush=True)
+
+
 # ------------------------------------------------------------------ main ----
 
 HELP = argparse.RawDescriptionHelpFormatter
@@ -1089,6 +1225,8 @@ def main() -> None:
   quote.bids / asks    五档 [[价格, 量]...], 买档降序卖档升序; 指数为 []
 
 注意: 闭市日返回上一交易日收盘快照; 期货涨跌停基于 pre_settle 而非 pre_close。
+盘中 last=0 表示该品种当日尚无成交 (如集合竞价前), 此时 change/change_pct 为 null,
+策略里请先判断 last>0 或 change_pct is not None。
 """,
         epilog="""\
 示例:
@@ -1168,6 +1306,69 @@ def main() -> None:
 """,
     )
     sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser(
+        "watch",
+        formatter_class=HELP,
+        help="常驻 tick 轮询: 长连接复用, 每个 tick 调用策略 on_tick 回调",
+        description="""\
+实盘信号监控的推荐入口。进程常驻, 所有连接复用 (eltdx 长连接 / requests.Session /
+tqsdk websocket), 无 CLI 每次启动的进程与握手开销; 每隔 --interval 秒拉一轮
+watchlist 最新价 (统一结构), 调用策略文件的 on_tick 回调, 返回的信号打印为
+[SIG] JSON 行并可追加到 --log JSONL 文件。
+
+策略文件约定 (普通 .py 文件, 无需注册):
+    def on_tick(quotes, feed_errors=None):
+        # quotes: 与 quote 命令相同的统一结构列表 (含 name/exchange/quote/bids...)
+        # feed_errors: 本轮数据源错误列表 (可省略此参数)
+        signals = []
+        for q in quotes:
+            if q["code"] == "rb" and q["quote"]["last"] > 3200:
+                signals.append({"symbol": "rb", "event": "breakout",
+                                "price": q["quote"]["last"]})
+        return signals          # 返回 list[dict], 空/None 表示无信号
+
+注意:
+- 新浪通道 (期货/ETF期权) 请保持 --interval >= 1 秒, 过高频有封禁风险
+- 基金净值是 T-1 数据, 不支持 tick
+- tqsdk 代码需要 .env 配置 TQ_USER/TQ_PASS; 仅 eltdx 代码则无需任何凭据
+""",
+        epilog="""\
+示例:
+  # 监控 ETF+期货+期权混合, 1秒一轮, 突破告警策略, 信号落盘:
+  %(prog)s sz159915 rb IF2612 10011255 --interval 1 \\
+      --strategy my_alert.py --log signals.jsonl --verbose
+
+  # 只监控 A股/ETF (纯 eltdx, 无需任何凭据), 可到 0.2s 间隔:
+  %(prog)s 600519 sz159915 sh000001 --interval 0.2
+
+  # 单轮调试 (跑一轮就退出):
+  %(prog)s rb --cycles 1 --verbose
+
+# my_alert.py 示例 (突破+涨跌幅告警):
+def on_tick(quotes):
+    out = []
+    for q in quotes:
+        qd = q["quote"]
+        if q["type"] == "futures" and qd["last"] and q["code"] == "IF2612" and qd["last"] > 4550:
+            out.append({"symbol": q["code"], "event": "breakout", "price": qd["last"]})
+        if qd["change_pct"] is not None and abs(qd["change_pct"]) >= 1.5:
+            out.append({"symbol": q["code"], "event": "big_move", "pct": qd["change_pct"]})
+    return out
+
+每轮周期 = max(数据耗时, --interval); [TICK] 行 (--verbose) 显示单轮耗时,
+通常 eltdx ~50ms、新浪每源 ~100-200ms, 1 秒间隔余量充足。
+""",
+    )
+    sp.add_argument("codes", nargs="+",
+                    help="任意混合 (同 quote): sh000001 600519 rb IF2612 10011255; 基金不支持")
+    sp.add_argument("--interval", type=float, default=1.0,
+                    help="轮询间隔秒 (默认1.0; 新浪通道勿低于1s)")
+    sp.add_argument("--strategy", default=None, help="策略 .py 文件路径, 需定义 on_tick(quotes)")
+    sp.add_argument("--log", default=None, help="信号 JSONL 落盘文件 (追加写)")
+    sp.add_argument("--cycles", type=int, default=0, help="轮数, 0=无限 (默认0; 1=单轮调试)")
+    sp.add_argument("--verbose", action="store_true", help="每轮打印 [TICK] 价格摘要")
+    sp.set_defaults(fn=cmd_watch)
 
     sp = sub.add_parser(
         "snapshot",
