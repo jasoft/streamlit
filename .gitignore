@@ -10,3 +10,17 @@ stockview/stockview.log
 stockview/.slider_state.json
 .env
 .cache/
+
+# IDE / agent tooling
+.agents/
+.claude/
+.zcode/
+
+# Runtime database (regenerable)
+market_data.db
+
+# Debug / scratch scripts (not for version control)
+stockview/check_names.py
+stockview/debug_*.py
+stockview/test_*.html
+test_playwright.py

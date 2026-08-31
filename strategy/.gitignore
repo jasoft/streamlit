@@ -1,0 +1,6 @@
+# Runtime state (pid / heartbeat / log / evals jsonl)
+state/
+
+# Research data (regenerable: csv / json / png)
+intraday/data/
+t0_intraday/data/
