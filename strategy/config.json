@@ -28,7 +28,7 @@
       "symbols": ["sz159915"],
       "params": {"switch_every": 2},
       "cash_per_symbol": 10000,
-      "live": {"dry_run": true, "execute_time": "14:55", "qfq": false, "poll_seconds": 5}
+      "live": {"dry_run": true, "execute_time": "14:55", "qfq": false, "poll_seconds": 5, "execute_every_poll": true, "skip_session_check": true}
     }
   }
 }

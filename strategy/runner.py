@@ -76,6 +76,7 @@ def run_loop(name: str, once: bool = False) -> None:
     poll = int(live.get("poll_seconds", 60))
     h, m = map(int, live["execute_time"].split(":"))
     executed_date = None
+    skip_session = live.get("skip_session_check", False)
 
     while True:
         if once:
@@ -85,32 +86,59 @@ def run_loop(name: str, once: bool = False) -> None:
             break
 
         now = dt.datetime.now()
-        if not is_trading_day(now) or not in_session(now):
+        if not skip_session and (not is_trading_day(now) or not in_session(now)):
             nxt = next_session_start(now)
             print(f"[{name}] 休市, 下次评估 {nxt}", flush=True)
             sleep_until(nxt, name, "waiting")
             continue
 
-        # ---- 盘中: 评估一轮 ----
+        # ---- 盘中: 评估 + 执行 ----
         hb = {"status": "watching", "last_eval": now.isoformat(timespec="seconds")}
         try:
-            results = trader.evaluate(name, cfg)
-            trader.append_evals(name, results)
-            hb["results"] = results
-            hb["alert"] = any(r["alert"] for r in results)
-            for r in results:
-                print(f"[{name}] {r['ts']} {r['symbol']} price={r['price']} "
-                      f"target={r['target']} {r['msg']}", flush=True)
-
-            # ---- 到点执行 (每天一次) ----
-            run_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            if now >= run_at and executed_date != now.date().isoformat():
+            if live.get("execute_every_poll"):
+                # 测试策略: 每轮直接 run_once (信号+下单+记账一次完成)
+                # run_once 内部调 compute_signal → target_position, 不再单独 evaluate 避免计数器重复自增
                 summary = trader.run_once(name, cfg)
-                executed_date = now.date().isoformat()
                 hb["last_run"] = now.isoformat(timespec="seconds")
                 hb["last_run_summary"] = summary
-                print(f"[{name}] 执行: {json.dumps(summary, ensure_ascii=False)}",
-                      flush=True)
+                # 从 summary 构造 evals (供前端展示)
+                evals = []
+                for s in summary.get("signals", []):
+                    evals.append({
+                        "ts": now.isoformat(timespec="seconds"),
+                        "symbol": s["symbol"], "price": s["close"],
+                        "target": s["target"],
+                        "alert": bool(summary.get("executed")),
+                        "msg": (f"⚠️ 执行{summary['executed'][0]['action']}" 
+                                if summary.get("executed") else "未触发"),
+                    })
+                trader.append_evals(name, evals)
+                hb["results"] = evals
+                hb["alert"] = any(e["alert"] for e in evals)
+                for r in evals:
+                    print(f"[{name}] {r['ts']} {r['symbol']} price={r['price']} "
+                          f"target={r['target']} {r['msg']}", flush=True)
+                if summary["executed"]:
+                    print(f"[{name}] 执行: {json.dumps(summary, ensure_ascii=False)}",
+                          flush=True)
+            else:
+                # 正常策略: 先评估, 到点才下单
+                results = trader.evaluate(name, cfg)
+                trader.append_evals(name, results)
+                hb["results"] = results
+                hb["alert"] = any(r["alert"] for r in results)
+                for r in results:
+                    print(f"[{name}] {r['ts']} {r['symbol']} price={r['price']} "
+                          f"target={r['target']} {r['msg']}", flush=True)
+
+                run_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now >= run_at and executed_date != now.date().isoformat():
+                    summary = trader.run_once(name, cfg)
+                    executed_date = now.date().isoformat()
+                    hb["last_run"] = now.isoformat(timespec="seconds")
+                    hb["last_run_summary"] = summary
+                    print(f"[{name}] 执行: {json.dumps(summary, ensure_ascii=False)}",
+                          flush=True)
         except Exception as e:
             hb["status"], hb["error"] = "error", repr(e)
             print(f"[{name}] ERROR {e!r}", flush=True)
