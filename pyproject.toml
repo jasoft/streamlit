@@ -23,4 +23,7 @@ dependencies = [
     "vectorbt>=1.0.0",
     "pyobjc-framework-cocoa>=12.2.2 ; sys_platform == 'darwin'",
     "pyobjc-framework-applicationservices>=12.2.2 ; sys_platform == 'darwin'",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+    "websockets>=16.1.1",
 ]
