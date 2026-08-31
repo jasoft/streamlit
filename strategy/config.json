@@ -1,0 +1,27 @@
+{
+  "strategies": {
+    "ma20_trend": {
+      "enabled": true,
+      "symbols": ["sz159915"],
+      "params": {"window": 20},
+      "cash_per_symbol": 10000,
+      "live": {"dry_run": true, "execute_time": "14:55", "qfq": false, "poll_seconds": 60}
+    },
+    "sma_cross": {
+      "enabled": false,
+      "symbols": ["sh510300"],
+      "params": {"fast": 10, "slow": 30},
+      "cash_per_symbol": 10000,
+      "live": {"dry_run": true, "execute_time": "14:55", "qfq": false, "poll_seconds": 60}
+    },
+    "intraday_t": {
+      "enabled": false,
+      "symbols": ["sz159915"],
+      "params": {"avg_days": 5, "vol_expand": 1.05, "vol_shrink": 0.95, "min_amount_yi": 20000,
+                 "rsi_fast": 6, "rsi_slow": 12, "oversold": 25, "vol_burst": 1.8,
+                 "vwap_band": 0.003, "surge": 0.015, "stale_min": 20},
+      "cash_per_symbol": 10000,
+      "live": {"dry_run": true, "execute_time": "14:50", "qfq": false, "poll_seconds": 60}
+    }
+  }
+}
