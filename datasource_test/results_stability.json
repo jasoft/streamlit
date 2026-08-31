@@ -1,0 +1,76 @@
+[
+  {
+    "case": "akshare futures_zh_spot(RB0)",
+    "n": 10,
+    "ok": 10,
+    "avg_ms": 117,
+    "errors": {}
+  },
+  {
+    "case": "akshare futures_zh_spot(IF0)",
+    "n": 10,
+    "ok": 10,
+    "avg_ms": 107,
+    "errors": {}
+  },
+  {
+    "case": "sina直连 CON_OP_ 批量期权",
+    "n": 10,
+    "ok": 10,
+    "avg_ms": 100,
+    "errors": {}
+  },
+  {
+    "case": "akshare option_sse_spot_price_sina",
+    "n": 5,
+    "ok": 5,
+    "avg_ms": 100,
+    "errors": {}
+  },
+  {
+    "case": "akshare option_current_day_sse(官网)",
+    "n": 3,
+    "ok": 3,
+    "avg_ms": 181,
+    "errors": {}
+  },
+  {
+    "case": "akshare option_current_day_szse(官网)",
+    "n": 3,
+    "ok": 3,
+    "avg_ms": 406,
+    "errors": {}
+  },
+  {
+    "case": "akshare futures_display_main_sina",
+    "n": 3,
+    "ok": 3,
+    "avg_ms": 7458,
+    "errors": {}
+  },
+  {
+    "case": "akshare futures_zh_realtime(螺纹钢)",
+    "n": 3,
+    "ok": 3,
+    "avg_ms": 137,
+    "errors": {}
+  },
+  {
+    "case": "efinance futures.get_realtime_quotes",
+    "n": 5,
+    "ok": 0,
+    "avg_ms": null,
+    "errors": {
+      "ConnectionError:HTTPConnectionPool(host='push2.eastmoney.com', port=80): Max": 5
+    }
+  },
+  {
+    "case": "qstock realtime_data(期货)",
+    "n": 3,
+    "ok": 0,
+    "avg_ms": null,
+    "errors": {
+      "KeyError:\"None of [Index(['代码', '名称', '涨幅', '最新', '最高', '最低', '今开', '": 3
+    }
+  }
+]

@@ -1,0 +1,186 @@
+[
+  {
+    "lib": "akshare",
+    "category": "商品期货",
+    "api": "futures_display_main_sina",
+    "ok": true,
+    "detail": "rows=82 cols=['symbol', 'exchange', 'name'] symbols含RB=True",
+    "ms": 7542
+  },
+  {
+    "lib": "akshare",
+    "category": "商品期货",
+    "api": "futures_zh_spot(RB0)",
+    "ok": false,
+    "detail": "RB0 last=None time=230000",
+    "ms": 191
+  },
+  {
+    "lib": "akshare",
+    "category": "商品期货",
+    "api": "futures_zh_spot(RB2610)",
+    "ok": false,
+    "detail": "RB2610 last=None",
+    "ms": 108
+  },
+  {
+    "lib": "akshare",
+    "category": "商品期货",
+    "api": "futures_zh_realtime(螺纹钢)",
+    "ok": true,
+    "detail": "rows=13",
+    "ms": 213
+  },
+  {
+    "lib": "akshare",
+    "category": "金融期货",
+    "api": "futures_zh_spot(IF0,CFF)",
+    "ok": false,
+    "detail": "IF0 last=None",
+    "ms": 111
+  },
+  {
+    "lib": "akshare",
+    "category": "金融期货",
+    "api": "futures_main_sina(IF0)",
+    "ok": true,
+    "detail": "rows=7 last_close=None",
+    "ms": 212
+  },
+  {
+    "lib": "akshare",
+    "category": "ETF期权",
+    "api": "option_sse_underlying_spot_price_sina",
+    "ok": true,
+    "detail": "rows=33 head={'字段': '证券简称', '值': '上证50ETF华夏'}",
+    "ms": 101
+  },
+  {
+    "lib": "akshare",
+    "category": "ETF期权",
+    "api": "option_sse_codes_sina(2609)",
+    "ok": true,
+    "detail": "rows=14 first={'序号': 1, '期权代码': '10011255'}",
+    "ms": 96
+  },
+  {
+    "lib": "akshare",
+    "category": "ETF期权",
+    "api": "option_sse_spot_price_sina",
+    "ok": true,
+    "detail": "code=1 rows=1",
+    "ms": 198
+  },
+  {
+    "lib": "akshare",
+    "category": "ETF期权",
+    "api": "option_current_em(东财)",
+    "ok": false,
+    "detail": "EXC ConnectionError: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))",
+    "ms": 4418
+  },
+  {
+    "lib": "akshare",
+    "category": "ETF期权",
+    "api": "option_current_day_szse",
+    "ok": true,
+    "detail": "rows=444",
+    "ms": 588
+  },
+  {
+    "lib": "akshare",
+    "category": "商品期权",
+    "api": "option_commodity_contract_sina",
+    "ok": true,
+    "detail": "rows=4 cols=['序号', '合约']",
+    "ms": 503
+  },
+  {
+    "lib": "akshare",
+    "category": "商品期权",
+    "api": "sina OPT_ 直连(实验)",
+    "ok": false,
+    "detail": "code=1 resp='var hq_str_OPT_1=\"\";\\n'",
+    "ms": 538
+  },
+  {
+    "lib": "efinance",
+    "category": "商品期货",
+    "api": "futures.get_realtime_quotes",
+    "ok": true,
+    "detail": "rows=1075 cols=['期货代码', '期货名称', '涨跌幅', '最新价', '最高', '最低']",
+    "ms": 162
+  },
+  {
+    "lib": "efinance",
+    "category": "金融期货",
+    "api": "get_realtime_quotes→中金所",
+    "ok": false,
+    "detail": "中金所 rows=0",
+    "ms": 104
+  },
+  {
+    "lib": "qstock",
+    "category": "商品期货",
+    "api": "future_info()",
+    "ok": false,
+    "detail": "EXC KeyError: \"['ID', '市场'] not in index\"",
+    "ms": 6570
+  },
+  {
+    "lib": "qstock",
+    "category": "金融期货",
+    "api": "future_info()→IF/IM",
+    "ok": false,
+    "detail": "EXC KeyError: \"['ID', '市场'] not in index\"",
+    "ms": 6463
+  },
+  {
+    "lib": "qstock",
+    "category": "商品期货",
+    "api": "realtime_data(期货)",
+    "ok": true,
+    "detail": "rows=400",
+    "ms": 2695
+  },
+  {
+    "lib": "pytdx",
+    "category": "商品期货",
+    "api": "TdxExHq_API(扩展行情)",
+    "ok": false,
+    "detail": "全部 8 台扩展行情服务器 7727 端口拒连",
+    "ms": 24054
+  },
+  {
+    "lib": "mootdx",
+    "category": "商品期货",
+    "api": "Quotes(ext).quote",
+    "ok": false,
+    "detail": "invalid literal for int() with base 10: 'RB2610'",
+    "ms": 5507
+  },
+  {
+    "lib": "tqsdk",
+    "category": "商品期货",
+    "api": "TqApi(匿名)+KQ.m@SHFE.rb",
+    "ok": false,
+    "detail": "EXC Exception: 请输入 auth （快期账户）参数，快期账户是使用 tqsdk 的前提，如果没有请点击注册，注册地址：https://account.shinnytech.com/。",
+    "ms": 2499
+  },
+  {
+    "lib": "tqsdk",
+    "category": "商品期货",
+    "api": "TqApi(假账号验证需注册)",
+    "ok": false,
+    "detail": "EXC Exception: 用户权限认证失败 (403,{'error': '用户名或密码错误', 'error_description': '用户名或密码错误, 请重新输入'})",
+    "ms": 98
+  },
+  {
+    "lib": "eltdx",
+    "category": "ETF期权(仅标的,无期权)",
+    "api": "quotes.get_snapshots",
+    "ok": false,
+    "detail": "EXC TypeError: codes has an invalid type",
+    "ms": 75
+  }
+]

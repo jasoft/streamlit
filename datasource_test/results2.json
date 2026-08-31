@@ -1,0 +1,90 @@
+[
+  {
+    "lib": "akshare",
+    "category": "商品期货",
+    "api": "futures_zh_spot(RB0)[修正]",
+    "ok": true,
+    "detail": "RB0 螺纹钢连续 last=3178.0 bid=3177.0 ask=3178.0",
+    "ms": 163
+  },
+  {
+    "lib": "akshare",
+    "category": "商品期货",
+    "api": "futures_zh_spot(M0)",
+    "ok": true,
+    "detail": "M0 last=3359.0",
+    "ms": 105
+  },
+  {
+    "lib": "akshare",
+    "category": "金融期货",
+    "api": "futures_zh_spot(IF0,CFF)[修正]",
+    "ok": true,
+    "detail": "IF0 last=4593.6",
+    "ms": 93
+  },
+  {
+    "lib": "akshare",
+    "category": "金融期货",
+    "api": "futures_zh_spot(IM0,CFF)",
+    "ok": true,
+    "detail": "IM0 last=7666.6",
+    "ms": 107
+  },
+  {
+    "lib": "akshare",
+    "category": "ETF期权",
+    "api": "option_sse_spot_price_sina[修正]",
+    "ok": true,
+    "detail": "code=10011255 cols=['字段', '值'] head={'字段': '买量', '值': '1'}",
+    "ms": 201
+  },
+  {
+    "lib": "akshare",
+    "category": "ETF期权",
+    "api": "option_current_day_sse(上交所官网)",
+    "ok": true,
+    "detail": "上交所官网 rows=666 cols=['合约编码', '合约交易代码', '合约简称', '标的券名称及代码', '类型', '行权价']",
+    "ms": 175
+  },
+  {
+    "lib": "akshare",
+    "category": "ETF期权",
+    "api": "option_current_day_szse[内容检查]",
+    "ok": true,
+    "detail": "深交所官网 rows=444 cols=['序号', '合约编码', '合约代码', '合约简称', '标的证券简称(代码)', '合约类型', '行权价', '合约单位']",
+    "ms": 426
+  },
+  {
+    "lib": "akshare",
+    "category": "商品期权",
+    "api": "新浪直连5种格式(实验)",
+    "ok": false,
+    "detail": "样本=['rb2610', 'rb2701'] 命中=0 resp[:80]='var hq_str_OPT_RB2610=\"\";\\nvar hq_str_OPT_o_RB2610=\"\";\\nvar hq_str_o_RB2610=\"\";\\nva'",
+    "ms": 462
+  },
+  {
+    "lib": "akshare",
+    "category": "商品期权",
+    "api": "新浪 getOptionData 页面源",
+    "ok": false,
+    "detail": "HTTP 200 len=42 head='{\"result\":{\"status\":{\"code\":0},\"data\":[]}}'",
+    "ms": 101
+  },
+  {
+    "lib": "efinance",
+    "category": "商品期货",
+    "api": "get_realtime_quotes[复测2]",
+    "ok": false,
+    "detail": "EXC ConnectionError: HTTPConnectionPool(host='push2.eastmoney.com', port=80): Max retries exceeded with url: /api/qt/clist/get?pn=1&pz=200&po=1&np=1&fltt=2&invt=2&fid=f12&fs=m%3A113",
+    "ms": 335
+  },
+  {
+    "lib": "qstock",
+    "category": "商品期货",
+    "api": "future_info()[复测2]",
+    "ok": false,
+    "detail": "EXC ValueError: signal only works in main thread of the main interpreter",
+    "ms": 11
+  }
+]
