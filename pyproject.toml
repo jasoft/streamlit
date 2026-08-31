@@ -20,4 +20,7 @@ dependencies = [
     "eltdx>=3.0.9",
     "tqsdk>=3.10.2",
     "mini-racer>=0.12.4",
+    "vectorbt>=1.0.0",
+    "pyobjc-framework-cocoa>=12.2.2 ; sys_platform == 'darwin'",
+    "pyobjc-framework-applicationservices>=12.2.2 ; sys_platform == 'darwin'",
 ]
