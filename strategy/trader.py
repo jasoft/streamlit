@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import datetime as _dt
 import json
 import subprocess
 import sys
@@ -21,6 +23,70 @@ from strategy.engine import LOT, today_target  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 THS_TRADE = REPO_ROOT / "scripts" / "ths_trade.py"
 STATE_DIR = Path(__file__).resolve().parent / "state"
+
+
+# -------------------------- 进程内 eltdx 直连 --------------------------
+# 每秒刷新场景下 subprocess fdata 开销 (~300-500ms) 不可接受, 直接在进程内用 eltdx.
+
+@contextlib.contextmanager
+def _tdx_inproc():
+    """进程内 eltdx TdxClient 上下文管理器.
+
+    每次调用测速+连接池构建约 50-100ms, 每秒调用一次可接受;
+    避免 subprocess fdata 的 300-500ms Python 启动开销.
+    """
+    from eltdx import TdxClient
+    with TdxClient(timeout=3) as c:
+        yield c
+
+
+def fetch_intraday_1m(symbol: str) -> tuple[pd.DataFrame, float]:
+    """获取当日 1m K 线 + 昨收价 (eltdx 进程内直连).
+
+    Returns:
+        (df, pre_close) — df 列 [time, open, high, low, close, volume_lots, amount]
+        仅包含当日数据 (09:30-11:30 + 13:00-15:00), volume 单位手, amount 元.
+        pre_close 为昨收价 (从快照取).
+    """
+    with _tdx_inproc() as c:
+        # 1m K 线 — count=280 够装一个交易日 (240 根 + 余量)
+        bars = c.bars.get(symbol, period="1m", kind="stock", count=280)
+        # 快照拿昨收
+        snaps = c.quotes.get_snapshots([symbol])
+        snap = snaps[0]
+        pre_close = snap.pre_close_price
+
+    rows = []
+    for b in bars.bars:
+        t = b.time.replace(tzinfo=None)  # 去时区, 统一 naive
+        rows.append({
+            "time": t,
+            "open": b.open, "high": b.high, "low": b.low, "close": b.close,
+            "volume_lots": b.volume_lots, "amount": b.amount,
+        })
+    df = pd.DataFrame(rows)
+
+    # 仅保留当日
+    today = _dt.date.today()
+    df = df[df["time"].dt.date == today].reset_index(drop=True)
+    return df, float(pre_close)
+
+
+def fetch_quote_snapshot(symbol: str) -> dict:
+    """获取实时快照 (last_price, pre_close, total_hand, amount, high, low, open)."""
+    with _tdx_inproc() as c:
+        snaps = c.quotes.get_snapshots([symbol])
+        s = snaps[0]
+    return {
+        "last": float(s.last_price),
+        "pre_close": float(s.pre_close_price),
+        "open": float(s.open_price),
+        "high": float(s.high_price),
+        "low": float(s.low_price),
+        "total_hand": float(s.total_hand),
+        "amount": float(s.amount),
+        "change_pct": float(s.change_pct),
+    }
 
 
 def _fetch(code: str, qfq: bool, timeframe: str = "day", limit: int | None = None) -> pd.DataFrame:

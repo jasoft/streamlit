@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -197,74 +198,221 @@ elif page == "🚦 实盘策略管理":
                "到 execute_time 执行下单. dry-run=只填单不提交 (同花顺需在运行).")
     cfg = config_mod.load(strategies)
 
+    # ---------------- MACD / VWAP 工具 ----------------
+    def _macd(close: pd.Series, fast=12, slow=26, signal=9) -> pd.DataFrame:
+        """同花顺 MACD(12,26,9): DIF/DEA/柱子×2."""
+        ema12 = close.ewm(span=fast, adjust=False).mean()
+        ema26 = close.ewm(span=slow, adjust=False).mean()
+        dif = ema12 - ema26
+        dea = dif.ewm(span=signal, adjust=False).mean()
+        return pd.DataFrame({"dif": dif, "dea": dea, "hist": (dif - dea) * 2})
+
+    def _vwap(df: pd.DataFrame) -> pd.Series:
+        """同花顺均价线 = 累计成交额 / 累计成交量(股)."""
+        vol_shares = df["volume_lots"] * 100  # 手 -> 股
+        vwap = df["amount"].cumsum() / vol_shares.cumsum()
+        return vwap
+
+    # ---------------- 画一个 symbol 的同花顺风格分时图 ----------------
+    def _make_intraday_fig(symbol: str, strategy_name: str,
+                           df_1m: pd.DataFrame, pre_close: float,
+                           snp: dict, evals_targets: list) -> go.Figure:
+        """构建 3 子图 (价+VWAP+昨收 / 成交量 / MACD), 深色风格, 右侧涨跌幅轴."""
+        n = len(df_1m)
+        if n == 0:
+            fig = go.Figure()
+            fig.update_layout(title=f"{symbol} · 今日无分时数据 (盘前/休市)")
+            return fig
+
+        # 用快照更新最后一个 bar (让实时价动起来)
+        df = df_1m.copy()
+        last_idx = df.index[-1]
+        df.loc[last_idx, "close"] = snp["last"]
+        # VWAP / MACD
+        df["vwap"] = _vwap(df)
+        macd = _macd(df["close"])
+
+        # --- 3 子图布局 (价 / 量 / MACD) ---
+        fig = make_subplots(rows=3, cols=1,
+                            row_heights=[0.55, 0.2, 0.25],
+                            shared_xaxes=True, vertical_spacing=0.02)
+
+        # === 上图: 价格线 + VWAP + 昨收 ===
+        # VWAP (黄线)
+        fig.add_trace(go.Scattergl(
+            x=df["time"], y=df["vwap"], name="均价",
+            line=dict(color="#ffd700", width=1.3), opacity=0.9),
+            row=1, col=1)
+        # 价格 (白色/浅色线, 同花顺是黄色偏亮, 用浅蓝区分)
+        fig.add_trace(go.Scattergl(
+            x=df["time"], y=df["close"], name="价格",
+            line=dict(color="#4fc3f7", width=1.5)),
+            row=1, col=1)
+        # 昨收水平虚线
+        fig.add_hline(y=pre_close, line_dash="dot", line_color="#888",
+                      annotation_text=f"昨收 {pre_close:.3f}",
+                      annotation_position="top left",
+                      row=1, col=1)
+
+        # 右侧涨跌幅轴 (相对昨收)
+        fig.update_yaxes(
+            title_text="价", row=1, col=1,
+            tickformat=".3f",
+            side="left",
+            gridcolor="#2a2a2a", linecolor="#333",
+            zeroline=False)
+        fig.update_yaxes(
+            title_text="涨跌%", row=1, col=1,
+            tickformat=".2f", ticksuffix="%",
+            side="right",
+            tickmode="linear",
+            zeroline=False,
+            # 把价映射到涨跌幅: tick值 = (price - pre_close) / pre_close * 100
+            # plotly 不支持自定义 tick 映射, 用 overlay axis 近似
+            overlaying="y",
+            showticklabels=True)
+
+        # === 中图: 成交量柱 (涨红跌绿) ===
+        vol_colors = ["#ef5350" if c >= o else "#26a69a"
+                      for c, o in zip(df["close"], df["open"])]
+        fig.add_trace(go.Bar(
+            x=df["time"], y=df["volume_lots"], name="成交量(手)",
+            marker_color=vol_colors, opacity=0.8),
+            row=2, col=1)
+        fig.update_yaxes(title_text="量(手)", row=2, col=1,
+                         gridcolor="#2a2a2a", linecolor="#333",
+                         zeroline=False, tickformat=",")
+
+        # === 下图: MACD ===
+        hist_colors = ["#ef5350" if v >= 0 else "#26a69a"
+                       for v in macd["hist"]]
+        fig.add_trace(go.Bar(x=df["time"], y=macd["hist"], name="MACD",
+                             marker_color=hist_colors, opacity=0.8), row=3, col=1)
+        fig.add_trace(go.Scattergl(x=df["time"], y=macd["dif"], name="DIF",
+                                   line=dict(color="#e0e0e0", width=1.2)),
+                      row=3, col=1)
+        fig.add_trace(go.Scattergl(x=df["time"], y=macd["dea"], name="DEA",
+                                   line=dict(color="#ffd700", width=1.2)),
+                      row=3, col=1)
+        fig.update_yaxes(title_text="MACD", row=3, col=1,
+                         gridcolor="#2a2a2a", linecolor="#333", zeroline=True)
+
+        # === 策略买卖标记 ===
+        # evals_targets: [{ts, target, price, ...}] — 按时间排, 找 target 翻转
+        if len(evals_targets) >= 2:
+            buys_x, buys_y = [], []
+            sells_x, sells_y = [], []
+            for i in range(1, len(evals_targets)):
+                prev_t = evals_targets[i - 1]["target"]
+                cur_t = evals_targets[i]["target"]
+                if cur_t != prev_t:
+                    # 找最接近 evals 时刻的 1m bar
+                    ets = pd.to_datetime(evals_targets[i]["ts"]).tz_localize(None) \
+                        if "tz" in evals_targets[i].get("ts", "") \
+                        else pd.to_datetime(evals_targets[i]["ts"])
+                    # 截断到分钟精度
+                    ets = ets.replace(second=0, microsecond=0)
+                    matches = df[df["time"] == ets]
+                    if len(matches) == 0:
+                        # 找最近的 bar
+                        diffs = (df["time"] - ets).abs()
+                        idx = diffs.idxmin()
+                    else:
+                        idx = matches.index[0]
+                    price_at = df.loc[idx, "close"]
+                    if cur_t == 1:
+                        buys_x.append(df.loc[idx, "time"])
+                        buys_y.append(price_at)
+                    else:
+                        sells_x.append(df.loc[idx, "time"])
+                        sells_y.append(price_at)
+
+            if buys_x:
+                fig.add_trace(go.Scattergl(
+                    x=buys_x, y=buys_y, name="买入信号",
+                    mode="markers",
+                    marker=dict(symbol="triangle-up", size=11, color="#00c853",
+                                line=dict(color="white", width=0.5))),
+                    row=1, col=1)
+            if sells_x:
+                fig.add_trace(go.Scattergl(
+                    x=sells_x, y=sells_y, name="卖出信号",
+                    mode="markers",
+                    marker=dict(symbol="triangle-down", size=11, color="#ff1744",
+                                line=dict(color="white", width=0.5))),
+                    row=1, col=1)
+
+        # === 深色主题, 标题 ===
+        now = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+        chg_pct = snp["change_pct"]
+        chg_color = "#ef5350" if chg_pct >= 0 else "#26a69a"
+        title_html = (f'<b>{symbol}</b> 分时 · <span style="color:{chg_color}">'
+                      f'{snp["last"]:.3f} {chg_pct:+.2f}%</span> '
+                      f'· 策略 <b>{strategy_name}</b> · {now}')
+        fig.update_layout(
+            template="plotly_dark",
+            title=dict(text=title_html, x=0.01, font=dict(size=14)),
+            height=560,
+            margin=dict(l=40, r=50, t=40, b=20),
+            paper_bgcolor="#1e1e1e",
+            plot_bgcolor="#1e1e1e",
+            hovermode="x unified",
+            legend=dict(orientation="h", y=1.02, x=0, font=dict(size=11),
+                        bgcolor="#1e1e1e"),
+            xaxis=dict(gridcolor="#2a2a2a", linecolor="#333"),
+            xaxis3=dict(gridcolor="#2a2a2a", linecolor="#333"),
+        )
+        # 午休时间不特意隐藏, plotly 时间轴会自然留白
+
+        return fig
+
     def live_panel(name: str, running: bool):
-        """实时面板: 最新评估 + 处理结果流水 + 分时图 + 日K图. 运行中每 60s 自动刷新."""
+        """实时面板: 最新评估 + 每秒刷新分时图 (同花顺风格) + 历史日K + 流水."""
         scfg = cfg["strategies"][name]
         qfq = scfg["live"]["qfq"]
 
-        @st.fragment(run_every="60s" if running else None)
+        @st.fragment(run_every="1s" if running else None)
         def panel():
+            # --- 最新评估 metrics ---
             evals = trader.read_evals(name, tail=60)
             if evals:
                 st.subheader("最新评估")
                 latest = {}
-                for e in evals:  # 每标的取最新一条
+                for e in evals:
                     latest[e["symbol"]] = e
                 cols = st.columns(len(latest) or 1)
                 for c, (symbol, e) in zip(cols, latest.items()):
                     ma_key = next((k for k in e if k.startswith("ma")), "ma20")
-                    c.metric(f"{symbol}", f"{e['price']}",
-                             f"{ma_key} {e[ma_key]}", delta_color="off")
+                    price_now = e["price"]
+                    chg = trader.fetch_quote_snapshot(symbol)
+                    c.metric(f"{symbol}", f"{price_now}",
+                             f"{ma_key} {e[ma_key]} · {chg['change_pct']:+.2f}%",
+                             delta_color="off")
                     c.markdown(f"**{e['msg']}** · 目标仓位 {e['target']} · {e['ts']}")
-            if evals and any(e["alert"] for e in evals):
-                st.warning("⚠️ 有触发信号但尚未执行 —— 到执行时刻由策略进程自动下单, "
-                           "或点「立即跑一轮」手动触发 (dry-run)")
 
-            st.subheader("日内分时 (5m)")
+            # --- 同花顺风格分时图 (每秒刷新) ---
             for symbol in scfg["symbols"]:
                 try:
-                    intraday = trader.fetch_intraday(symbol, "5m", limit=100)
-                    daily = load_data(symbol, qfq)
+                    df_1m, pre_close = trader.fetch_intraday_1m(symbol)
+                    snp = trader.fetch_quote_snapshot(symbol)
                 except Exception as e:
-                    st.error(f"{symbol} 数据获取失败: {e}")
+                    st.error(f"{symbol} 分时数据获取失败: {e}")
                     continue
-                intraday = intraday.sort_values("date")
-                daily = daily.assign(date=pd.to_datetime(daily["date"]))
-                day = intraday["date"].dt.date.iloc[-1]
-                intraday = intraday[intraday["date"].dt.date == day]
-                w = int(scfg["params"].get("window", scfg["params"].get("slow", 20)))
-                ma_now = (daily["close"].rolling(w).mean().iloc[-1]
-                          if len(daily) >= w else None)
-                prev_close = daily[daily["date"].dt.date < day]["close"].iloc[-1] \
-                    if len(daily[daily["date"].dt.date < day]) else None
 
-                fig = go.Figure()
-                fig.add_trace(go.Scattergl(x=intraday["date"], y=intraday["close"],
-                                           name="分时", line=dict(color="#2962ff", width=1.5)))
-                if prev_close is not None:
-                    fig.add_hline(y=prev_close, line_dash="dot", line_color="#9e9e9e",
-                                  annotation_text=f"昨收 {prev_close:.3f}")
-                if ma_now is not None:
-                    fig.add_hline(y=ma_now, line_dash="dash", line_color="#ff6d00",
-                                  annotation_text=f"MA{w} {ma_now:.3f}")
-                last = intraday.iloc[-1]
-                fig.add_trace(go.Scattergl(x=[last["date"]], y=[last["close"]],
-                                           name="最新", mode="markers+text",
-                                           text=[f"{last['close']:.3f}"], textposition="top right",
-                                           marker=dict(size=10, color="#00c853")))
-                fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
-                                  title=f"{symbol} · {day}", hovermode="x unified",
-                                  legend=dict(orientation="h", y=1.02, x=0))
-                st.plotly_chart(fig, use_container_width=True, key=f"intra_{name}_{symbol}")
+                # 过滤该 symbol 的 evals 历史 (用于画策略买卖标记)
+                sym_evals = [e for e in evals if e.get("symbol") == symbol]
+                fig = _make_intraday_fig(name, symbol, df_1m, pre_close, snp, sym_evals)
+                st.plotly_chart(fig, use_container_width=True,
+                                key=f"intra_{name}_{symbol}")
 
-            st.subheader("历史日K (近 120 日) 与应有仓位")
+            # --- 历史日K (近 120 日) 与应有仓位 ---
             state = trader.load_state(name)
             w = int(scfg["params"].get("window", scfg["params"].get("slow", 20)))
             for symbol in scfg["symbols"]:
                 try:
                     daily = load_data(symbol, qfq)
                 except Exception as e:
-                    st.error(f"{symbol} 数据获取失败: {e}")
+                    st.error(f"{symbol} 日K获取失败: {e}")
                     continue
                 d = daily.assign(date=pd.to_datetime(daily["date"])).tail(120).reset_index(drop=True)
                 d["ma"] = d["close"].rolling(w).mean()
@@ -286,18 +434,20 @@ elif page == "🚦 实盘策略管理":
                         textposition="top center",
                         marker=dict(size=12, color=color, symbol="diamond")))
                 fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
-                                  title=symbol, hovermode="x unified",
-                                  xaxis_rangeslider_visible=False,
+                                  title=f"{symbol} · 近 120 日", hovermode="x unified",
+                                  xaxis_rangeslider_visible=False, template="plotly_dark",
                                   legend=dict(orientation="h", y=1.02, x=0))
-                st.plotly_chart(fig, use_container_width=True, key=f"dk_{name}_{symbol}")
+                st.plotly_chart(fig, use_container_width=True,
+                                key=f"dk_{name}_{symbol}")
 
+            # --- 处理结果流水 ---
             if evals:
-                st.subheader(f"处理结果流水 (最近 {min(len(evals), 30)} 条, "
-                             "每次取数一条)")
+                st.subheader(f"处理结果流水 (最近 {min(len(evals), 30)} 条)")
                 ev = pd.DataFrame(evals[-30:][::-1])
                 show_cols = [c for c in ["ts", "symbol", "price", "msg", "target"]
                              if c in ev.columns]
-                st.dataframe(ev[show_cols], use_container_width=True, height=300)
+                st.dataframe(ev[show_cols], use_container_width=True, height=300,
+                             hide_index=True)
 
         return panel
 
