@@ -63,43 +63,57 @@ def fetch_intraday_1m(symbol: str) -> tuple[pd.DataFrame, float]:
         return df_all, snap_pre_close
     df_all = df_all.sort_values("time").reset_index(drop=True)
 
-    today = _dt.date.today()
-    by_day = df_all.groupby(df_all["time"].dt.date)
-    # 盘中: 只要今天有 bar 就用今天的 (哪怕只有 1 根, 实时分时逐步填充)
-    # 盘后/隔夜: today 不在 by_day 或当日 bars=0 → 回退到上一完整交易日
-    if today in by_day.groups and len(by_day.get_group(today)) > 0:
-        target_day = today
+    # 交易日归组: 期货夜盘 (>=20:00) 与周末凌晨尾盘归入下一个工作日,
+    # 使夜盘 21:00 -> 次日 02:30 与日盘合成同一"交易日" (同花顺分时口径).
+    # 股票/ETF 没有 20:00+ 或周末 bar, 映射为恒等, 行为不变.
+    def _trading_day(ts):
+        d = ts.date()
+        if ts.hour >= 20 or d.weekday() >= 5:
+            d += _dt.timedelta(days=1)
+            while d.weekday() >= 5:
+                d += _dt.timedelta(days=1)
+        return d
+
+    df_all["td"] = df_all["time"].map(_trading_day)
+    by_day = df_all.groupby("td")
+
+    # 目标交易日: 夜盘时段 (>=20:00) 与凌晨尾盘 (<03:00) 取正在进行中的交易日,
+    # 其余时间取自然日今天; 不在分组里 (盘后/周末/停牌) 回退上一完整交易日
+    now = _dt.datetime.now()
+    if now.hour >= 20 or now.hour < 3:
+        target_day = _trading_day(now)
     else:
+        target_day = now.date()
+    if target_day not in by_day.groups or len(by_day.get_group(target_day)) == 0:
         # 选上一个有 ≥200 根 bars 的完整交易日
         days_sorted = sorted(by_day.groups.keys(), reverse=True)
-        target_day = None
+        fallback = None
         for d in days_sorted:
-            if d == today:
+            if d == target_day:
                 continue
             if len(by_day.get_group(d)) >= 200:
-                target_day = d
+                fallback = d
                 break
-        if target_day is None:
-            # 找不到完整日, 退而求其次: 选除今天外 bars 数最多的那天
+        if fallback is None:
+            # 找不到完整日, 退而求其次: 选 bars 数最多的那天
             best_day = None
             best_len = 0
             for d in days_sorted:
-                if d == today:
+                if d == target_day:
                     continue
-                l = len(by_day.get_group(d))
-                if l > best_len:
-                    best_len = l
+                if len(by_day.get_group(d)) > best_len:
+                    best_len = len(by_day.get_group(d))
                     best_day = d
-            target_day = best_day if best_day is not None else today
+            fallback = best_day
+        target_day = fallback
 
     df = by_day.get_group(target_day).reset_index(drop=True) if target_day in by_day.groups else df_all.iloc[0:0]
 
-    # pre_close: 取目标交易日之前的最后一个交易日最后 1 根 bar 的 close,
+    # pre_close: 取目标交易日之前的最后一根 bar 的 close (含其夜盘),
     # 没有则用快照 pre_close 兜底
     pre_close = snap_pre_close
     if target_day is not None:
-        # target_day 之前的所有 bars (全部交易日) 中最后一根 close
-        prior = df_all[df_all["time"].dt.date < target_day]
+        prior = df_all[df_all["td"] < target_day]
         if not prior.empty:
             pre_close = float(prior["close"].iloc[-1])
     return df, pre_close

@@ -67,6 +67,56 @@ function minuteToIndex(hhmm: string): number {
   return FULL_DAY_LABELS.indexOf(hhmm);
 }
 
+function hhmmToMin(h: string): number {
+  const [a, b] = h.split(":").map(Number);
+  return a * 60 + b;
+}
+
+function minLabel(m: number): string {
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+}
+
+/** 夜盘收盘时间 (分钟, 相对当日 00:00): 只列非 23:00 收盘的品种, 其余夜盘品种默认 23:00 收 */
+const NIGHT_END: Record<string, number> = {
+  au: 150, ag: 150, sc: 150, bc: 150,               // 贵金属/原油 02:30
+  cu: 60, al: 60, zn: 60, pb: 60, ni: 60, sn: 60,   // 基本金属 01:00
+};
+
+/** 期货交易时段网格 (分时图预占位, 与 A 股 240 格同思路: 线随交易推进逐步向右填充).
+ * 槽位按交易日顺序: [夜盘 21:00-23:59] [跨午夜 00:00-夜盘收] 日盘(09:00-10:15/10:30-11:30/13:30-15:00).
+ * 需配合后端按交易日归组的 bar (昨夜盘+今凌晨尾盘+日盘合并, 同花顺口径);
+ * bars 必须时间升序 (夜盘上下半场 HH:MM 重复, 前向映射消歧).
+ * 有 bar 落在模板外 (品种时段未知, 如中金所/国债期货/外盘) 返回 null, 调用方退回实际时间轴.
+ */
+function buildFuturesGrid(symbol: string, bars: KBar[]): { labels: string[]; slotOfBar: number[] } | null {
+  if (!bars.length) return null;
+  const prod = (symbol.match(/^[a-z]+/i)?.[0] ?? "").toLowerCase();
+  const mins = bars.map(b => hhmmToMin(toHHMM(b.date)));
+  const hasNight = NIGHT_END[prod] != null
+    || mins.some(m => m >= 21 * 60) || mins.some(m => m <= 3 * 60);
+  const nightEnd = NIGHT_END[prod]
+    ?? (hasNight ? 23 * 60 : -1); // -1 = 无夜盘
+  const labels: string[] = [];
+  const seg = (from: number, to: number) => { for (let m = from; m <= to; m++) labels.push(minLabel(m)); };
+  if (nightEnd >= 0) seg(21 * 60, 23 * 60 + 59);    // 夜盘上半场
+  if (nightEnd > 0) seg(0, nightEnd);               // 夜盘下半场 (跨午夜)
+  seg(9 * 60, 10 * 60 + 15);                        // 日盘三段
+  seg(10 * 60 + 30, 11 * 60 + 30);
+  seg(13 * 60 + 30, 15 * 60);
+  const slotOfBar: number[] = [];
+  let cur = 0;
+  for (const m of mins) {
+    let k = -1;
+    for (let i = cur; i < labels.length; i++) {
+      if (hhmmToMin(labels[i]) === m) { k = i; break; }
+    }
+    if (k < 0) return null; // 模板外时间 -> 实际时间轴兜底
+    slotOfBar.push(k);
+    cur = k;
+  }
+  return { labels, slotOfBar };
+}
+
 /** 把 bar.date (形如 "2026-08-31 10:35:00") 截成 HH:MM */
 function toHHMM(s: string): string {
   const t = String(s).replace("T", " ");
@@ -346,73 +396,53 @@ function renderIntraday(
   const close0 = bars[0]?.close ?? 1;
   const base = preClose ?? bars[0]?.open ?? close0;
 
-  // ---- X 轴: fullDayAxis=true 用全天 240 格占位, 否则用实际 bars 的 HH:MM ----
+  // ---- X 轴三模式: A股全天240格 / 期货时段网格(夜盘预占位) / 实际时间轴兜底 ----
   let xLabels: string[];
-  let priceSeries: (number | null)[];   // 白线: 每分钟收盘价
-  let vwapSeries: (number | null)[];    // 黄线: 成交均价 = 累计成交额/累计成交量
-  let volSeries: any[];                 // 量柱
-
-  if (fullDayAxis) {
-    // 以 bar 的 HH:MM 为 key, 把 bars 填入对应 slot, 其他 slot=null
-    const priceByMin = new Map<string, number | null>();
-    const volByMin = new Map<string, number>();
-    const amtByMin = new Map<string, number>();
-    FULL_DAY_LABELS.forEach(m => {
-      priceByMin.set(m, null);
-      volByMin.set(m, 0);
-      amtByMin.set(m, 0);
-    });
-    bars.forEach(b => {
-      const m = toHHMM(b.date);
-      priceByMin.set(m, b.close);
-      volByMin.set(m, (volByMin.get(m) ?? 0) + b.volume);
-      const avgPx = (b.open + b.high + b.low + b.close) / 4;
-      amtByMin.set(m, (amtByMin.get(m) ?? 0) + avgPx * b.volume);
-    });
-
-    // VWAP: 只累计到"实际有成交量"的分钟; 没到达的分钟返回 null (前端不连线/不预画直线)
-    let cumAmt = 0, cumVol = 0;
+  let slotOfBar: number[] | null = null;   // bar -> 槽位 index; null = 槽位即 bar 序号 (实际时间轴)
+  if (fullDayAxis && bars.every(b => minuteToIndex(toHHMM(b.date)) >= 0)) {
     xLabels = FULL_DAY_LABELS;
-    priceSeries = xLabels.map(m => priceByMin.get(m) ?? null);
-    vwapSeries = xLabels.map(m => {
-      const v = volByMin.get(m) ?? 0;
-      const a = amtByMin.get(m) ?? 0;
-      // 没成交的分钟 → 均价不填充, 避免被画成"一条预先铺好的直线"
-      if (v === 0) return null;
-      cumAmt += a; cumVol += v;
-      return cumVol > 0 ? cumAmt / cumVol : null;
-    });
-    volSeries = xLabels.map(m => {
-      const v = volByMin.get(m) ?? 0;
-      const p = priceByMin.get(m);
-      const refPx = p ?? base;
-      const prevP = (() => {
-        const idx = FULL_DAY_LABELS.indexOf(m);
-        for (let k = idx - 1; k >= 0; k--) {
-          const pp = priceByMin.get(FULL_DAY_LABELS[k]);
-          if (pp != null) return pp;
-        }
-        return base;
-      })();
-      const col = refPx >= prevP ? "#ef5350" : "#26a69a";
-      return { value: v, itemStyle: { color: v > 0 ? col : "transparent" } };
-    });
+    slotOfBar = bars.map(b => minuteToIndex(toHHMM(b.date)));
+  } else if (fullDayAxis) {
+    const g = buildFuturesGrid(symbol, bars);
+    if (g) {
+      xLabels = g.labels;
+      slotOfBar = g.slotOfBar;
+    } else {
+      xLabels = bars.map(b => toHHMM(b.date));
+    }
   } else {
     xLabels = bars.map(b => toHHMM(b.date));
-    let cumAmt = 0, cumVol = 0;
-    priceSeries = bars.map(b => b.close);
-    vwapSeries = bars.map(b => {
-      const avgPx = (b.open + b.high + b.low + b.close) / 4;
-      cumAmt += avgPx * b.volume;
-      cumVol += b.volume;
-      return cumVol > 0 ? cumAmt / cumVol : null;
-    });
-    volSeries = bars.map((b, i) => {
-      const prev = i > 0 ? bars[i - 1].close : b.open;
-      const col = b.close >= prev ? "#ef5350" : "#26a69a";
-      return { value: b.volume, itemStyle: { color: col } };
-    });
   }
+
+  // 按槽位填充 价格/量/额; 未到达的槽位保持 null/0 (线只画到当前进度, 右侧是预占位)
+  const priceSeries: (number | null)[] = new Array(xLabels.length).fill(null);
+  const volRaw: number[] = new Array(xLabels.length).fill(0);
+  const amtRaw: number[] = new Array(xLabels.length).fill(0);
+  bars.forEach((b, i) => {
+    const k = slotOfBar ? slotOfBar[i] : i;
+    if (k == null || k < 0 || k >= xLabels.length) return;
+    priceSeries[k] = b.close;
+    volRaw[k] += b.volume;
+    amtRaw[k] += ((b.open + b.high + b.low + b.close) / 4) * b.volume;
+  });
+
+  // VWAP: 只累计到"实际有成交量"的分钟; 没到达的分钟返回 null (前端不连线/不预画直线)
+  let cumAmt = 0, cumVol = 0;
+  const vwapSeries: (number | null)[] = volRaw.map((v, k) => {
+    if (v === 0) return null;
+    cumAmt += amtRaw[k]; cumVol += v;
+    return cumVol > 0 ? cumAmt / cumVol : null;
+  });
+  const volSeries = volRaw.map((v, k) => {
+    if (v === 0) return { value: 0, itemStyle: { color: "transparent" } };
+    const refPx = priceSeries[k] ?? base;
+    let prevP = base;
+    for (let j = k - 1; j >= 0; j--) {
+      if (priceSeries[j] != null) { prevP = priceSeries[j]!; break; }
+    }
+    const col = refPx >= prevP ? "#ef5350" : "#26a69a";
+    return { value: v, itemStyle: { color: col } };
+  });
 
   // 0 轴 (昨收) 参考线 (涨跌幅%)
   const yMin = Math.min(
@@ -426,22 +456,19 @@ function renderIntraday(
   const yLo = yMin - (yMax - yMin) * 0.15 - 0.01;
   const yHi = yMax + (yMax - yMin) * 0.15 + 0.01;
 
-  // Markers: fullDayAxis (分时) 用 bars 真实时间戳映射槽位, kline 走双轨 (exact/day)
-  let markPoints: any[];
-  if (fullDayAxis) {
-    // 把 marker 日期 (精确/日级) → 全日 240 格分钟槽 index
-    const idxExact = new Map<string, number>();
-    const idxDay = new Map<string, number>();
-    bars.forEach(b => {
-      const slotIdx = minuteToIndex(toHHMM(b.date));
-      if (slotIdx < 0) return;
-      idxExact.set(normDate(b.date), slotIdx);
-      idxDay.set(normDateDay(b.date), slotIdx); // 同天保留最后一个
-    });
-    markPoints = markers
-      .map(mk => {
-        const x = idxExact.get(normDate(mk.date)) ?? idxDay.get(normDateDay(mk.date));
-        if (x == null) return null;
+  // Markers: 网格/实际时间轴统一用槽位映射 (exact 优先, 日级兜底)
+  const idxExact = new Map<string, number>();
+  const idxDay = new Map<string, number>();
+  bars.forEach((b, i) => {
+    const k = slotOfBar ? slotOfBar[i] : i;
+    if (k == null || k < 0) return;
+    idxExact.set(normDate(b.date), k);
+    idxDay.set(normDateDay(b.date), k); // 同天保留最后一个
+  });
+  const markPoints = markers
+    .map(mk => {
+      const x = idxExact.get(normDate(mk.date)) ?? idxDay.get(normDateDay(mk.date));
+      if (x == null) return null;
         const lots = mk.qty ? Math.round(mk.qty / 100) + "手" : "";
         const hasPnl = mk.action === "卖出" && mk.pnl != null;
         const pnlVal = hasPnl ? (mk.pnl! >= 0 ? "+" : "") + fmtMoney(mk.pnl!) : "";
@@ -463,19 +490,34 @@ function renderIntraday(
         } as any;
       })
       .filter(Boolean) as any[];
-  } else {
-    const indexes = buildDateIdx(xLabels.map((_l, i) => bars[i]?.date ?? _l));
-    markPoints = buildMarkPoints(markers, indexes);
-  }
 
   const pctFmt = (v: number) => fmtPct((v - base) / base);
+
+  // 实时价: 最后一根有效分钟的 close (WS tick 会实时覆写), 同花顺风格大字徽标 涨红跌绿
+  const lastPrice = (() => {
+    for (let i = priceSeries.length - 1; i >= 0; i--) {
+      const v = priceSeries[i];
+      if (v != null) return v;
+    }
+    return base;
+  })();
+  const chgPct = base ? (lastPrice - base) / base : 0;
+  const chgTxt = (chgPct >= 0 ? "+" : "") + fmtPct(chgPct);
+  const pxColor = chgPct >= 0 ? "#ef5350" : "#22c55e"; // 涨红跌绿
 
   chart.setOption({
     backgroundColor: "#0f0f0f",
     title: {
-      text: `${name}  分时  VWAP${base ? `  · 昨收 ${fmtPrice(base)}` : ""}${markers.length ? `  · ${markers.length}信号` : ""}`,
+      // 实时价并入标题同一段富文本第二行, 与标题严格左对齐; 涨红跌绿大字
+      text: `{t|${name}  分时  VWAP${base ? `  · 昨收 ${fmtPrice(base)}` : ""}${markers.length ? `  · ${markers.length}信号` : ""}}\n{px|${fmtPrice(lastPrice)}  ${chgTxt}}`,
       left: 12, top: 8,
-      textStyle: { color: "#e0e0e0", fontSize: 14 },
+      textStyle: {
+        color: "#e0e0e0", fontSize: 14,
+        rich: {
+          t: { color: "#e0e0e0", fontSize: 14, lineHeight: 20 },
+          px: { color: pxColor, fontSize: 18, fontWeight: "bold" as const, lineHeight: 24 },
+        },
+      },
     },
     animation: false,
     tooltip: {
@@ -537,11 +579,16 @@ function renderIntraday(
         axisLine: { lineStyle: { color: "#333" } },
         axisLabel: {
           color: "#888", fontSize: 10,
-          // 每 30 分钟显示一个标签
-          interval: (index: number, v: string) => {
-            const mm = v.slice(-2);
-            return mm === "00" || mm === "30";
-          },
+          // 每 30 分钟显示一个标签; 段边界 (如 02:30 与 09:00 只差 1 格) 至少隔 5 格防重叠
+          interval: (() => {
+            let lastShown = -100;
+            return (index: number, v: string) => {
+              const m = hhmmToMin(v);
+              const ok = m % 30 === 0 && index - lastShown >= 5;
+              if (ok) lastShown = index;
+              return ok;
+            };
+          })(),
         },
         splitLine: { show: true, lineStyle: { color: "#1a1a1a", type: "dashed" } },
         axisTick: { show: false },

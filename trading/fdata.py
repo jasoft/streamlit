@@ -651,6 +651,13 @@ def _tq_kline_rows(tq_sym: str, dur_sec: int, limit: int | None) -> list:
     bars = []
     for r in kl.to_dict("records"):
         ts = r.get("datetime")
+        # data_length 大于实际历史时, tqsdk 前面补 datetime=0 的空槽 (NaN OHLC),
+        # 解析出来是 1970-01-01, 必须在源头丢弃, 否则 JSON 序列化 NaN 直接 500
+        try:
+            if not ts or float(ts) <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
         dt = pd.to_datetime(ts, unit="ns", utc=True, errors="coerce")
         if pd.isna(dt):
             continue  # 跳过未完成/无效 bar
