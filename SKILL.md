@@ -1,7 +1,7 @@
 # Quant Trading System — SKILL 文档
 
 > **项目路径**: `/Users/weiwang/Projects/streamlit`
-> **接手必读**: 本项目是一个完整的 A 股/ETF 个人量化交易系统，包含 Next.js 前端、FastAPI 后端、策略框架、数据网关、同花顺 GUI 自动化下单、条件单引擎六大子系统。**请先完整阅读「硬约束」「架构」「常见坑」三节再动手**，违反任何一条都会出生产级故障。
+> **接手必读**: 本项目是一个完整的 A 股/ETF 个人量化交易系统，包含 Next.js 前端、FastAPI 后端、策略框架、数据网关、同花顺 GUI 自动化下单、条件单引擎、网格交易引擎七大子系统。**请先完整阅读「硬约束」「架构」「常见坑」三节再动手**，违反任何一条都会出生产级故障。
 
 ***
 
@@ -54,9 +54,9 @@
 └──────────────────┘  └──────────────────┘  └──────────────────────────┘
         ▲                                            ▲
         │                                            │
-        └─────────────── 条件单引擎 ─────────────────┘
-                  scripts/condition_orders.py
-            WATCH → 开盘跌破阈值买 → ARMED → 反弹卖 → DONE
+        └─────────────── 条件单/网格单引擎 ───────────┘
+            condition_orders.py | grid_orders.py
+     WATCH→ARMED→DONE  |  区间低吸高抛·基准价滚动
 ```
 
 ### 关键设计原则（不可违背）
@@ -135,6 +135,8 @@
 │   ├── fdata.py                ★★★ 统一金融数据 CLI + TCP长连接服务器
 │   ├── ths_trade.py            ★★★ 同花顺 Mac GUI 自动交易 (AX API)
 │   ├── condition_orders.py     ★ 条件单引擎 (WATCH→ARMED→DONE状态机)
+│   ├── grid_orders.py          ★ 网格交易引擎 (区间低吸高抛, 基准价滚动)
+│   ├── test_grid_logic.py      网格引擎逻辑测试 (24 断言, 离线)
 │   ├── check_window.py         调试: 同花顺 AX 窗口树检查
 │   ├── stress_test.py          下单压测脚本
 │   ├── extreme_fill_test.py    极端填单测试
@@ -207,7 +209,10 @@ uv run python scripts/fdata.py quote sz159915
 uv run python scripts/ths_trade.py positions
 
 # 条件单（模拟模式, 安全）
-uv run python scripts/condition_orders.py --poll 5
+uv run python trading/condition_orders.py --poll 5
+
+# 网格交易（模拟模式, 安全）
+uv run python trading/grid_orders.py --poll 5
 ```
 
 ***
@@ -714,9 +719,104 @@ uv run python scripts/condition_orders.py --live --poll 5
 
 - 记账复用 runtime 层（共享一个 Portfolio + Broker），与回测/实盘同口径
 
+### 10.4 Web 管理（前端「⚡ 条件单」Tab, 2026-09 新增）
+
+顶部导航「⚡ 条件单」(`/conditions`) 直接管理引擎, 无需命令行：
+
+- **引擎控制**：启动（可选初始资金 / 刷新间隔 / ⚡实盘 checkbox，勾选有 confirm 弹窗）/ 停止。
+  引擎跑在 FastAPI 后端进程的事件循环上，状态徽标实时显示 运行中·模拟 / 运行中·实盘 / 已停止。
+- **增删条件单**：表单填 标的/触发跌幅/买入数量/反弹卖出/开盘窗口，引擎运行中动态加单无需重启；
+  同一标的只允许一单（重复会被 400 拒绝）。
+- **状态展示**：订单表（WATCH/ARMED/DONE 徽标 + 实时价与 gap + 买卖记录）、
+  账户（Portfolio 现金/持仓）、引擎日志（环形 300 条）。页面每 3s 轮询刷新。
+- **持久化**：订单配置+运行时状态存 `backend/condition_orders.json`（状态变更即落盘），
+  资金/持仓走 `strategy/state/condition_orders.state.json`；引擎重启后 ARMED/DONE 不丢。
+  CLI（10.3）与 Web 共用同一份 `backend/condition_orders.json`（文件存在则优先于内置 CONDITION_ORDERS）。
+
+REST API（FastAPI :8000）：
+
+```
+GET    /api/conditions                  全量状态 (引擎+订单+组合+日志)
+POST   /api/conditions                  新增条件单 {symbol, trigger_gap_pct, buy_qty, sell_rally_pct, open_window_min}
+DELETE /api/conditions/{id}             删除条件单
+POST   /api/conditions/engine/start     {live, cash, poll_seconds}
+POST   /api/conditions/engine/stop
+```
+
+注意：后端 uvicorn `--reload` 重启会把引擎一并停掉（引擎在 backend 进程内），到页面重新点启动即可。
+
 ***
 
-## 十一、常见 Bug 排查速查
+## 十一、网格交易引擎（grid\_orders.py）
+
+复刻券商 APP 云网格：区间内自动低吸高抛。与条件单引擎（§10）同款架构——
+asyncio 每单独立协程 + 共享 Portfolio/Broker + 引擎跑在 FastAPI 进程内。
+
+### 11.1 核心模型与状态机
+
+```
+  基准价 base ─→ 买触发 = base×(1−step%) 或 base−step   (等比 pct / 等差 price)
+             ─→ 卖触发 = base×(1+step%) 或 base+step
+  成交后 base 滚动更新为触发价, 重算双触发价 → 持续向下买 / 向上卖
+
+  RUNNING ──手动暂停──→ PAUSED (触发价/深度/持仓保留, 可恢复)
+     │
+     ├─ 买卖触发价均出区间 → EXHAUSTED (网格失效, 删单重建)
+     └─ 有效期到期        → EXPIRED (自动暂停)
+```
+
+- **成交驱动（内置）**：上一笔委托未确认成交前不判定新触发，过滤假突破、防重复下单
+- **区间口径（THS）**：触发价出界 → 该方向停；双向出界 → 失效；回到区间内自动恢复
+- **交易时段**：同条件单（09:30–11:30 / 13:00–15:00），非交易时段只盯不判
+
+### 11.2 券商功能复刻 + 增强
+
+| 功能 | 参数 | 说明 |
+| ---- | ---- | ---- |
+| 等比/等差间距 | `grid_unit` pct/price + `step` | 券商标配 |
+| 每格按股数/按金额 | `qty_mode` qty/cash + `per_qty`/`per_cash` | 金额按现价折 100 整手 |
+| 最大持仓上限 | `max_position` (0=不限) | 到上限只卖不买 |
+| 最小底仓 | `min_position` (0=不限) | 到下限只买不卖（卖出自动缩量） |
+| 有效期 | `expire_date` (空=长期) | 到期自动 EXPIRED |
+| 回落卖出/反弹买入 | `sell_retrace_pct` / `buy_rebound_pct` | 触发后跟踪极值确认才成交（同花顺） |
+| 梯度倍量 | `multiplier` | 第 n 档买入量 ×mⁿ，金字塔摊薄（广发/中信建投） |
+| 下单价格浮动 | `pad_pct` | 对价委托 ±浮动保成交（买加价/卖降价） |
+| 启动底仓 | `base_qty` | 建单后首次运行立即买入，不计 depth（THS 建议有底仓才能做上行网格） |
+| T+1 保护 | `t1_protect` (默认开) | 当日买入批次当日不卖，贴近 A 股实盘 |
+
+记账口径：`depth` = 净加仓深度（买+1/卖−1）；卖出量 = 最近一批买入量（depth>0）
+或标准每格量（depth=0，底仓高抛）；`realized_pnl` 按批次成本核算累计，前端展示。
+
+### 11.3 Web 管理（前端「🌐 网格」Tab, 2026-09 新增）
+
+顶部导航「🌐 网格」(`/grids`)：
+
+- **引擎控制**：同条件单（§10.4），但为独立引擎/独立账户（`grid_orders.state.json`），与条件单互不干扰
+- **新建网格**：标的/区间/间距/每格数量 + 全部增强参数；右侧实时预览（首档买卖触发价、
+  上下行档数、含倍量的最大加仓资金估算）+ 区间刻度条；「取当前价」拉行情预填基准价并建议 ±10% 区间
+- **网格卡片**：区间可视化（档位线/买卖触发价/当前价指针）+ 运行数据（基准价/双触发价/
+  depth/完成轮数/累计盈亏/最近成交）+ 单单暂停/恢复/删除
+- **持久化**：`backend/grid_orders.json`（配置+运行时状态）+ `strategy/state/grid_orders.state.json`（资金/持仓）
+
+REST API（FastAPI :8000）：
+
+```
+GET    /api/grids                      全量状态 (引擎+网格+组合+日志)
+POST   /api/grids                      新建网格单 (校验: 区间/间距/基准价在区间内/整手/倍量≥1/有效期格式)
+DELETE /api/grids/{id}                 删除网格单 (已有持仓保留在账户)
+POST   /api/grids/{id}/pause|resume    单单暂停/恢复
+POST   /api/grids/engine/start         {live, cash, poll_seconds}
+POST   /api/grids/engine/stop
+```
+
+CLI：`uv run python trading/grid_orders.py [--live] [--cash 100000] [--poll 5]`
+逻辑测试：`uv run python trading/test_grid_logic.py`（24 断言，离线喂价格序列，不碰行情/同花顺）
+
+注意：同一标的不允许多网格（共享持仓会交叉干扰）；uvicorn `--reload` 重启会停引擎（同 §10.4）。
+
+***
+
+## 十二、常见 Bug 排查速查
 
 ### 前端图表类
 
@@ -759,7 +859,7 @@ uv run python scripts/condition_orders.py --live --poll 5
 
 ***
 
-## 十二、硬约束清单（任何情况下都不得违反）
+## 十三、硬约束清单（任何情况下都不得违反）
 
 1. **成交口径统一**: 收盘出信号 → 次日开盘成交。回测 vbt\_adapter shift(1)+price=open；实盘 BacktestBroker flush\_pending(下根 open)。任何时候不能让"当日 close 信号当日 close 成交"（未来函数）
 2. **策略信号统一 target position 0/1**，不是买卖动作。策略代码中**禁止出现** **`if backtest/if live`** **分支判断**，保持 Write Once Run Anywhere
@@ -777,7 +877,7 @@ uv run python scripts/condition_orders.py --live --poll 5
 
 ***
 
-## 十三、部署架构
+## 十四、部署架构
 
 ### 当前状态（本地开发）
 
@@ -809,7 +909,7 @@ Dockerfile + start.sh + nginx.conf 已存在于项目根目录，但 ths\_trade 
 
 ***
 
-## 十四、环境变量与配置文件
+## 十五、环境变量与配置文件
 
 ### `.env`（项目根目录，gitignore 未提交）
 
@@ -859,7 +959,7 @@ FDATA_TIMEOUT=8
 
 ***
 
-## 十五、命令速查表
+## 十六、命令速查表
 
 ```bash
 # ===== 启动 =====
@@ -879,8 +979,13 @@ uv run python scripts/ths_trade.py switch-account sim        # 切到模拟账�
 uv run python scripts/ths_trade.py cancel --all              # 全撤
 
 # ===== 条件单 =====
-uv run python scripts/condition_orders.py --poll 5      # 模拟模式
-uv run python scripts/condition_orders.py --live --poll 5  # 实盘
+uv run python trading/condition_orders.py --poll 5      # 模拟模式
+uv run python trading/condition_orders.py --live --poll 5  # 实盘
+
+# ===== 网格交易 =====
+uv run python trading/grid_orders.py --poll 5           # 模拟模式
+uv run python trading/grid_orders.py --live --poll 5    # 实盘
+uv run python trading/test_grid_logic.py                # 引擎逻辑测试 (离线)
 
 # ===== 回测 =====
 curl -X POST http://localhost:8000/api/backtest \
@@ -893,7 +998,7 @@ uv run python -m unittest tests.test_strategy_system     # 策略系统单测
 
 ***
 
-## 十六、给接手 AI 的特别提示
+## 十七、给接手 AI 的特别提示
 
 1. **中文沟通**：用户偏好中文
 2. **不要瞎创新**：用户喜欢"不要多余操作、最直接代码、最少改动"。用户明确说过不要清空价格框、不要做多余检查
@@ -908,7 +1013,7 @@ uv run python -m unittest tests.test_strategy_system     # 策略系统单测
 
 ***
 
-## 十七、待办与已知未完成项
+## 十八、待办与已知未完成项
 
 1. **Docker 部署完整闭环**：宿主机 ths\_trade agent + Webhook 未实现
 2. **intraday\_t 策略参数调优**：回测表现 -1.9% vs 买入持有 +5.1%（两市缩量环境），vol\_expand/min\_amount\_yi 阈值需重调

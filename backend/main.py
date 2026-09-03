@@ -13,6 +13,19 @@ API 设计:
     POST /api/strategies/{name}/stop
     POST /api/strategies/{name}/run-once  dry-run 执行一轮
     GET  /api/evals/{name}               最近 N 条评估记录
+    GET  /api/quote/{symbol}             实时快照
+    GET  /api/conditions                 条件单全量状态 (引擎+订单+组合+日志)
+    POST /api/conditions                 新增条件单
+    DELETE /api/conditions/{id}          删除条件单
+    POST /api/conditions/engine/start    启动条件单引擎 {live, cash, poll_seconds}
+    POST /api/conditions/engine/stop     停止条件单引擎
+    GET  /api/grids                      网格单全量状态 (引擎+网格+组合+日志)
+    POST /api/grids                      新建网格单
+    DELETE /api/grids/{id}               删除网格单
+    POST /api/grids/{id}/pause           暂停单个网格
+    POST /api/grids/{id}/resume          恢复单个网格
+    POST /api/grids/engine/start         启动网格引擎 {live, cash, poll_seconds}
+    POST /api/grids/engine/stop          停止网格引擎
     GET  /api/positions                  同花顺实际持仓 (subprocess ths_trade)
     GET  /api/quote/{symbol}             实时快照
   WebSocket:
@@ -564,6 +577,137 @@ async def get_kline(symbol: str, tf: str = "day", qfq: bool = True,
                   "close": float(r["close"]), "volume": float(r["volume"])}
                  for _, r in df.iterrows()],
     }
+
+
+# --- 条件单 (trading/condition_orders.py 引擎的 Web 管理端) ---
+from backend import conditions as cond_mgr  # noqa: E402
+
+
+class ConditionAddReq(BaseModel):
+    symbol: str
+    trigger_gap_pct: float = -4.0   # 相对昨收跌幅触发买入 (负=低开买)
+    buy_qty: int = 100
+    sell_rally_pct: float = 1.0     # 反弹 (买入价+X%) 触发卖出
+    open_window_min: int = 3        # 开盘后判定买入的窗口分钟数
+
+
+class ConditionEngineReq(BaseModel):
+    live: bool = False
+    cash: float = 100_000.0
+    poll_seconds: float = 5.0
+
+
+@app.get("/api/conditions")
+async def get_conditions():
+    """条件单全量状态: 引擎运行态 + 订单 + 组合 + 日志. 引擎停止也可只读查看."""
+    return cond_mgr.status()
+
+
+@app.post("/api/conditions")
+async def add_condition(req: ConditionAddReq):
+    """新增条件单 (同一标的只允许一单). 引擎运行中则动态加单, 无需重启."""
+    try:
+        entry = cond_mgr.add_order(req.model_dump())
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "order": entry}
+
+
+@app.delete("/api/conditions/{co_id}")
+async def delete_condition(co_id: str):
+    if not cond_mgr.remove_order(co_id):
+        return JSONResponse(status_code=404, content={"detail": f"条件单 {co_id} 不存在"})
+    return {"ok": True}
+
+
+@app.post("/api/conditions/engine/start")
+async def start_condition_engine(req: ConditionEngineReq):
+    return await cond_mgr.start(req.live, req.cash, req.poll_seconds)
+
+
+@app.post("/api/conditions/engine/stop")
+async def stop_condition_engine():
+    return await cond_mgr.stop()
+
+
+# --- 网格单 (trading/grid_orders.py 引擎的 Web 管理端) ---
+from backend import grids as grid_mgr  # noqa: E402
+
+
+class GridAddReq(BaseModel):
+    symbol: str
+    upper: float                       # 网格上限
+    lower: float                       # 网格下限
+    grid_unit: str = "pct"             # pct=等比(%) / price=等差(元)
+    step: float = 2.0                  # 网格间距
+    base_price: float = 0.0            # 基准价 (首次触发计算基准, 成交后滚动)
+    qty_mode: str = "qty"              # qty=固定股数 / cash=固定金额
+    per_qty: int = 1000                # 每格股数 (qty 模式)
+    per_cash: float = 5000.0           # 每格金额 (cash 模式)
+    multiplier: float = 1.0            # 梯度倍量 (每深一档 x m, 1=等量)
+    max_position: int = 0              # 最大持仓 (0=不限)
+    min_position: int = 0              # 最小底仓 (0=不限)
+    sell_retrace_pct: float = 0.0      # 卖出回落确认 % (0=到价即卖)
+    buy_rebound_pct: float = 0.0       # 买入反弹确认 % (0=到价即买)
+    pad_pct: float = 0.0               # 下单价格浮动 % (买加/卖降保成交)
+    t1_protect: bool = True            # T+1: 当日买入批次当日不卖
+    expire_date: str = ""              # 有效期 YYYY-MM-DD (空=长期)
+    base_qty: int = 0                  # 启动底仓 (0=不买)
+
+
+class GridEngineReq(BaseModel):
+    live: bool = False
+    cash: float = 100_000.0
+    poll_seconds: float = 5.0
+
+
+@app.get("/api/grids")
+async def get_grids():
+    """网格单全量状态: 引擎运行态 + 网格 + 组合 + 日志. 引擎停止也可只读查看."""
+    return grid_mgr.status()
+
+
+@app.post("/api/grids")
+async def add_grid(req: GridAddReq):
+    """新建网格单 (同一标的只允许一个). 引擎运行中则动态加单, 无需重启."""
+    try:
+        entry = grid_mgr.add_grid(req.model_dump())
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "grid": entry}
+
+
+@app.delete("/api/grids/{gid}")
+async def delete_grid(gid: str):
+    if not grid_mgr.remove_grid(gid):
+        return JSONResponse(status_code=404, content={"detail": f"网格单 {gid} 不存在"})
+    return {"ok": True}
+
+
+@app.post("/api/grids/{gid}/pause")
+async def pause_grid(gid: str):
+    if not grid_mgr.pause_grid(gid):
+        return JSONResponse(status_code=400,
+                            content={"detail": f"网格 {gid} 暂停失败 (不存在或非运行态)"})
+    return {"ok": True}
+
+
+@app.post("/api/grids/{gid}/resume")
+async def resume_grid(gid: str):
+    if not grid_mgr.resume_grid(gid):
+        return JSONResponse(status_code=400,
+                            content={"detail": f"网格 {gid} 恢复失败 (不存在或非暂停态)"})
+    return {"ok": True}
+
+
+@app.post("/api/grids/engine/start")
+async def start_grid_engine(req: GridEngineReq):
+    return await grid_mgr.start(req.live, req.cash, req.poll_seconds)
+
+
+@app.post("/api/grids/engine/stop")
+async def stop_grid_engine():
+    return await grid_mgr.stop()
 
 
 # --- 启停 / 执行 ---
