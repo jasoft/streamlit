@@ -148,6 +148,19 @@ export default function ChartsPage() {
   const [fSymbol, setFSymbol] = useState("sz159915");
   const [fTf, setFTf] = useState("day");
   const [creating, setCreating] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  // 标的代码格式校验: 支持A股(sh/sz+6位 / 纯6位)、期货(主连 au0/IF0 + 合约 au2612/sr609)、
+  // 期权(8位数字 100*/900*)、基金(*.of)、外盘(@xxx / xxx.xx)
+  const isValidSymbol = (s: string): boolean => {
+    const v = s.trim();
+    if (!v) return false;
+    return /^(sh|sz|SH|SZ)?\d{6}$/.test(v)        // A股/ETF/指数
+      || /^[a-zA-Z]{1,2}(?:0|\d{3,4})$/.test(v)     // 期货 主连 au0/IF0 + 合约 au2612/sr609
+      || /^\d{8}$/.test(v)                         // 期权 1000xxxx / 900xxxx
+      || /^@[\w.]+$/.test(v)                       // 外盘 @xxx
+      || /^\w+\.\w{2,3}$/.test(v);                 // 基金 xxx.of / 外盘 xxx.hk
+  };
 
   useEffect(() => {
     api.strategies().then(setStrategies).catch(console.error);
@@ -193,14 +206,27 @@ export default function ChartsPage() {
   }, []);
 
   const handleCreate = async () => {
-    if (!fSymbol) return;
+    const sym = fSymbol.trim();
+    if (!sym) {
+      setFormError("请输入标的代码，例如 sz159915 或 sh510300");
+      return;
+    }
+    if (!isValidSymbol(sym)) {
+      setFormError(`「${sym}」不像有效的标的代码，请检查后重试。支持：sh/sz+6位数字、6位数字、期货(rb2510)、期权(8位数字)等`);
+      return;
+    }
+    setFormError(null);
     setCreating(true);
     try {
-      const kdata = await api.kline(fSymbol, fTf);
+      const kdata = await api.kline(sym, fTf);
+      if (!kdata.bars || kdata.bars.length === 0) {
+        setFormError(`未查到「${sym}」的K线数据，请确认代码是否正确`);
+        return;
+      }
       const id = `chart_${Date.now()}`;
-      const initLogs = appendLog([], `新建图: ${fSymbol} @ ${fTf}（请选择策略）`);
+      const initLogs = appendLog([], `新建图: ${sym} @ ${fTf}（请选择策略）`);
       const session: ChartSession = {
-        id, symbol: fSymbol, tf: fTf, strategy: "",
+        id, symbol: sym, tf: fTf, strategy: "",
         params: {}, schema: {}, liveMode: false,
         bars: kdata.bars || [], markers: [], orders: [], snapshot: null,
         running: false, auto: false, logs: initLogs,
@@ -210,7 +236,10 @@ export default function ChartsPage() {
       setActiveId(id);
       setShowNew(false);
     } catch (e: any) {
-      alert("创建失败: " + (e?.message || String(e)));
+      // 友善提示: 截断后端 traceback, 只展示首段关键信息
+      const raw = e?.message || String(e);
+      const firstLine = raw.split("\n")[0].slice(0, 120);
+      setFormError(`查询「${sym}」失败：${firstLine}`);
     } finally {
       setCreating(false);
     }
@@ -607,8 +636,12 @@ export default function ChartsPage() {
               <label className="text-[10px] text-[#666]">标的</label>
               <input
                 list="syms" value={fSymbol}
-                onChange={(e) => setFSymbol(e.target.value)}
-                className="bg-[#1a1a1a] border border-[#2a2a2a] rounded px-2 py-1 text-xs text-[#e0e0e0] focus:border-[#4fc3f7] outline-none w-32"
+                onChange={(e) => { setFSymbol(e.target.value); setFormError(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") handleCreate(); }}
+                placeholder="如 sz159915"
+                className={`bg-[#1a1a1a] border rounded px-2 py-1 text-xs text-[#e0e0e0] outline-none w-32 focus:border-[#4fc3f7] ${
+                  formError ? "border-[#ef5350]" : "border-[#2a2a2a]"
+                }`}
               />
               <datalist id="syms">
                 {COMMON_SYMBOLS.map((s) => <option key={s} value={s} />)}
@@ -632,6 +665,11 @@ export default function ChartsPage() {
             </button>
             <span className="text-[10px] text-[#555] pb-1">创建后加载策略</span>
           </div>
+          {formError && (
+            <div className="mt-1.5 text-[11px] text-[#ef5350] leading-tight whitespace-pre-wrap">
+              ⚠️ {formError}
+            </div>
+          )}
         </div>
       )}
 

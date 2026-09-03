@@ -280,8 +280,25 @@ def _kline_bars(client, code: str, period: str, kind: str,
 def cmd_kline(args) -> None:
     code = _norm_code(args.code)
     kind = args.kind
-    if kind == "auto":  # 指数代码自动判别: sh000xxx / sz399xxx
-        kind = "index" if code[:4] in ("sh00", "sz39") else "stock"
+    if kind == "auto":  # 自动判别: 期货(au/rb/IF等)优先, 再指数, 再股票
+        if _resolve_fut(code):
+            kind = "futures"
+        elif code[:4] in ("sh00", "sz39"):
+            kind = "index"
+        else:
+            kind = "stock"
+    # 期货走 tqsdk kline_serial (eltdx 不覆盖期货, 会报 invalid code)
+    if kind == "futures":
+        r = _resolve_fut(code)
+        if not r:
+            out({"source": "tqsdk", "code": code, "kind": "futures",
+                 "count": 0, "data": []})
+            return
+        dur = _PERIOD_DUR.get(args.period, 86400)
+        bars = _tq_kline_rows(r[2], dur, args.limit)
+        out({"source": "tqsdk", "code": code, "kind": "futures",
+             "count": len(bars), "data": bars})
+        return
     client = _tdx()
     try:
         bars = _kline_bars(client, code, args.period, kind,
@@ -598,6 +615,57 @@ def _tq_rows(symbols, api, wait_s: float = 10) -> list:
             )
         )
     return rows
+
+
+# ---- 期货 K线 (tqsdk kline_serial, 凭据从 .env 读 TQ_USER/TQ_PASS) ----
+# period 字符串 -> tqsdk 持续秒数 (day=86400, 5m=300, ...)
+_PERIOD_DUR = {
+    "day": 86400, "1d": 86400,
+    "1w": 604800, "week": 604800,
+    "60m": 3600, "1h": 3600,
+    "30m": 1800, "15m": 900, "5m": 300, "1m": 60,
+}
+
+
+def _tq_kline_rows(tq_sym: str, dur_sec: int, limit: int | None) -> list:
+    """tqsdk kline_serial -> 统一 bars (升序).
+
+    日线 dur_sec=86400, 5m=300, 15m=900, 30m=1800, 60m=3600, 1w=604800.
+    返回 [{date,open,high,low,close,volume,amount}] 与 eltdx kline 同构,
+    date 格式 'YYYY-MM-DD HH:MM:SS+08:00' (eltdx 同口径).
+    """
+    import pandas as pd  # noqa: PLC0415
+    from datetime import timezone, timedelta  # noqa: PLC0415
+    tz = timezone(timedelta(hours=8))
+    # tqsdk data_length 上限 8964; None/0 = 取满 (用上限值)
+    n = min(max(int(limit), 1) if limit else 8964, 8964)
+    with _hush():
+        api = _tq_api()
+        try:
+            kl = api.get_kline_serial(tq_sym, dur_sec, data_length=n)
+            api.wait_update(deadline=time.time() + 10)  # 超时返回False, 避免非主力合约无限阻塞
+        finally:
+            api.close()
+    if kl is None or len(kl) == 0:
+        return []  # 无数据 -> 降级路径抛 serve 原错, 不静默成功
+    bars = []
+    for r in kl.to_dict("records"):
+        ts = r.get("datetime")
+        dt = pd.to_datetime(ts, unit="ns", utc=True, errors="coerce")
+        if pd.isna(dt):
+            continue  # 跳过未完成/无效 bar
+        dt = dt.tz_convert(tz)
+        bars.append({
+            "date": dt.isoformat(sep=" ", timespec="seconds"),
+            "open": float(r.get("open") or 0),
+            "high": float(r.get("high") or 0),
+            "low": float(r.get("low") or 0),
+            "close": float(r.get("close") or 0),
+            "volume": float(r.get("volume") or 0),
+            "amount": float(r.get("amount") or 0) or 0.0,
+        })
+    bars.sort(key=lambda x: x["date"])
+    return bars
 
 
 # ---- 期货实时 (新浪 nf_ 直连, 具体合约与主连均支持, 一次 HTTP 批量) ----
@@ -1569,8 +1637,8 @@ volume 单位: 手 (指数为成交量手数, 股票/ETF 为手; 乘 100 得股/
     )
     sp.add_argument("code")
     sp.add_argument("--period", default="day", help="K线周期: day/30m/5m/... (默认 day)")
-    sp.add_argument("--kind", default="auto", choices=["auto", "index", "stock"],
-                    help="指数必须 index; 股票/ETF 用 stock (auto 按前缀自动判别)")
+    sp.add_argument("--kind", default="auto", choices=["auto", "index", "stock", "futures"],
+                    help="指数 index; 股票/ETF stock; 期货 futures(au/rb/IF等, 走tqsdk); auto 自动判别")
     sp.add_argument("--adjust", default="none", choices=["none", "qfq"], help="前复权 (默认不复权)")
     sp.add_argument("--limit", type=int, default=30, help="根数, 0=全部历史 (默认30)")
     sp.set_defaults(fn=cmd_kline)

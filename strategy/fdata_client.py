@@ -71,21 +71,23 @@ class FdataClient:
         line, _, self._buf = self._buf.partition(b"\n")
         return line.strip().decode("utf-8", "replace")
 
-    def request(self, req: dict) -> dict:
+    def request(self, req: dict, timeout: float = _TIMEOUT) -> dict:
         """请求服务器, 失败抛 ServerUnavailable (会重置连接).
 
         全程持锁: sendall + recv 必须原子, 否则多线程交叉 send 会使
         对应 recv 读到别条请求的响应, 导致 non-JSON / buffer 污染.
+        timeout: 本次 socket 超时秒数; 慢路径(如期货 kline 走 tqsdk)可调大.
         """
         with self._lock:
             if self._sock is None:
                 try:
-                    self._sock = socket.create_connection((_HOST, _PORT), _TIMEOUT)
-                    self._sock.settimeout(_TIMEOUT)
+                    self._sock = socket.create_connection((_HOST, _PORT), timeout)
+                    self._sock.settimeout(timeout)
                     self.source = "eltdx(serve)"
                 except OSError as e:
                     raise ServerUnavailable(f"connect {_HOST}:{_PORT} failed: {e}") from None
             try:
+                self._sock.settimeout(timeout)  # 复用连接: 每次请求覆盖超时
                 self._sock.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode())
                 return json.loads(self._recv_line())
             except (OSError, socket.timeout, ServerUnavailable):
@@ -120,22 +122,31 @@ def quote(code: str) -> dict | None:
 
 def kline(code: str, period: str = "day", kind: str = "stock",
           adjust: str | None = None, limit: int | None = None) -> list[dict]:
-    """K 线 bars 列表 (升序), 每条 {date,open,high,low,close,volume,amount}."""
+    """K 线 bars 列表 (升序), 每条 {date,open,high,low,close,volume,amount}.
+
+    自动路由所有品种:
+      - 股票/ETF/指数 (eltdx 前缀或 6 位数字): 走 serve eltdx 长连接
+      - 期货 (au/rb/IF0/IF2612 等): serve eltdx 不覆盖 (报 invalid code),
+        降级 CLI kline --kind auto, cmd_kline auto 判别期货 -> tqsdk kline_serial
+    """
     req: dict = {"op": "kline", "code": code, "period": period,
                  "kind": kind, "limit": limit}
     if adjust:
         req["adjust"] = adjust
     resp = _request(req)
-    if not resp:
-        return []
-    # serve: {"ok": True, "result": {"code","kind","count","data":[...]}}
-    # serve ok=False: {"ok": False, "error": "..."}
-    if resp.get("ok") is False and resp.get("error"):
-        raise RuntimeError(f"fdata kline {code} {period} failed: {resp['error']}")
+    # serve 成功 (eltdx 股票/指数)
     if resp.get("ok"):
         result = resp.get("result") or {}
         if isinstance(result, dict) and "data" in result:
             return result["data"]
+    # serve 失败 (非 eltdx 类型如期货 invalid code, 或 eltdx 断线):
+    # 降级 CLI kline, cmd_kline auto 自动路由期货->tqsdk / 股票->eltdx 子进程
+    if resp.get("ok") is False and resp.get("error"):
+        try:
+            return _kline_from_cli(code, period, adjust, limit)
+        except (ServerUnavailable, RuntimeError):
+            pass  # CLI 也失败 -> 抛 serve 原错误
+        raise RuntimeError(f"fdata kline {code} {period} failed: {resp['error']}")
     # 兜底: 直接有 data key, 或 result.data (serve cli op 透传格式)
     if "data" in resp and isinstance(resp["data"], list):
         return resp["data"]
@@ -143,6 +154,22 @@ def kline(code: str, period: str = "day", kind: str = "stock",
     if isinstance(result, dict) and "data" in result:
         return result["data"]
     return []
+
+
+def _kline_from_cli(code: str, period: str, adjust: str | None,
+                    limit: int | None) -> list[dict]:
+    """降级 CLI kline: serve kline op 失败时(如期货 invalid code),
+    走 serve 的 cli op 透传 fdata kline 子命令. cmd_kline auto 自动路由
+    期货 -> tqsdk kline_serial. 返回 bars 列表 (与 serve 同构).
+    """
+    argv = ["kline", code, "--period", period, "--kind", "auto"]
+    if adjust:
+        argv += ["--adjust", adjust]
+    # fdata kline --limit 0 = 全部历史; None 用 0 (chart 走 _fetch 时已传 3000)
+    argv += ["--limit", str(limit) if limit is not None else "0"]
+    # 期货 kline 走 tqsdk, wait_update 可能慢(非主力合约 ~10s), 用 60s 超时
+    r = cli(argv, timeout=60)  # 抛 ServerUnavailable / RuntimeError
+    return r.get("data", []) if isinstance(r, dict) else []
 
 
 def is_server_available() -> bool:
@@ -163,7 +190,7 @@ def cli(argv: list[str], timeout: int = 180) -> dict:
     """
     argv = [str(a) for a in argv]
     req: dict = {"op": "cli", "argv": argv, "timeout": timeout}
-    resp = _client.request(req)
+    resp = _client.request(req, timeout=float(timeout))
     if resp.get("ok"):
         _client.source = f"{argv[0]}(serve)"
         return resp["result"]
