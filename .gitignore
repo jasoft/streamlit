@@ -18,6 +18,11 @@ stockview/.slider_state.json
 
 # Runtime database (regenerable)
 market_data.db
+backend/charts.db
+backend/logs/
+
+# Trae memory (per-user, not source)
+.trae-cn/
 
 # Debug / scratch scripts (not for version control)
 stockview/check_names.py

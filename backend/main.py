@@ -30,18 +30,68 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import logging
+import traceback
+from logging.handlers import TimedRotatingFileHandler
+
 import numpy as np
 import pandas as pd
-from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+BACKEND_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
+
+
+# ---- 文件日志系统: backend/logs/app.log, 按天分卷, 保留 30 天 ----
+def _setup_file_logging() -> None:
+    """幂等配置文件日志 (uvicorn --reload 多进程 / 多次导入时不重复加 handler).
+
+    日志写入 backend/logs/app.log, 每天分卷 (app.log -> app.log.YYYY-MM-DD), 保留 30 天.
+    捕获根 logger + uvicorn.* + strategy.* + fdata_client INFO 级以上日志.
+    """
+    log_dir = BACKEND_ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "app.log"
+
+    root = logging.getLogger()
+    # 幂等检测: 已有同类 TimedRotatingFileHandler 指向同路径则跳过
+    for h in root.handlers:
+        if isinstance(h, TimedRotatingFileHandler) and getattr(h, "baseFilename", "") == str(log_path):
+            return
+
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    fh = TimedRotatingFileHandler(
+        log_path, when="midnight", backupCount=30, encoding="utf-8", utc=False,
+    )
+    fh.setFormatter(fmt)
+    fh.setLevel(logging.INFO)
+    root.addHandler(fh)
+
+    # 确保关键命名 logger 也有 INFO 级别 + propagate=True (默认), 让 root handler 收集到
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error",
+                 "strategy", "fdata_client", "backend", "trader"):
+        lg = logging.getLogger(name)
+        lg.setLevel(logging.INFO)
+        lg.propagate = True
+
+    # 启动标记
+    logging.info("[app] FastAPI 后端启动 - 文件日志就绪: %s", log_path)
+
+
+_setup_file_logging()
 
 from strategy import config as config_mod  # noqa: E402
 from strategy import manager, registry, trader  # noqa: E402
 from strategy.backtest import vbt_adapter  # noqa: E402
+from strategy.backtest import param_optimizer  # noqa: E402
 from strategy.fdata_client import is_server_available  # noqa: E402
 from strategy.trader import _fetch  # noqa: E402
 from strategy.trader import fetch_intraday_1m, fetch_quote_snapshot  # noqa: E402
@@ -51,6 +101,105 @@ from backend import store as chart_store  # noqa: E402
 
 app = FastAPI(title="量化交易后端", version="0.1.0")
 
+# ======================================================= 参数优化异步任务 =====
+# 贝叶斯 60 次通常 1-5 分钟，不能同步阻塞。用内存里的 job 字典 + 后台线程。
+# 单实例后端够用；要跨进程/持久化后续改 Redis/SQLite。
+import threading as _th
+import uuid as _uuid
+from dataclasses import dataclass as _dc, field as _field
+
+@_dc
+class OptimJob:
+    job_id: str
+    req: "ParamOptimizeReq"
+    status: str = "running"        # running / done / failed
+    progress: dict = _field(default_factory=dict)   # {current, total, latest_score, elapsed_ms, latest_info, history[]}
+    result: dict | None = None
+    error: str | None = None
+    created_at: float = _field(default_factory=lambda: _dt.datetime.now().timestamp())
+
+_OPTIM_JOBS: dict[str, OptimJob] = {}
+_OPTIM_JOBS_LOCK = _th.Lock()
+_OPTIM_MAX_JOBS = 64
+
+def _cleanup_jobs():
+    """只保留最近 _OPTIM_MAX_JOBS 个，老的丢弃（LRU 按 created_at）."""
+    if len(_OPTIM_JOBS) <= _OPTIM_MAX_JOBS:
+        return
+    items = sorted(_OPTIM_JOBS.items(), key=lambda kv: kv[1].created_at)
+    for k, _ in items[:-_OPTIM_MAX_JOBS]:
+        _OPTIM_JOBS.pop(k, None)
+
+def _run_job_worker(job_id: str):
+    from strategy.backtest import param_optimizer as _po
+    job = _OPTIM_JOBS.get(job_id)
+    if job is None:
+        return
+    req = job.req
+    try:
+        strat = registry.get(req.strategy)
+        # 交易成本: 从 config 解析 (后台线程内再解一次即可, 不会拖慢)
+        try:
+            _cfg = config_mod.load(registry.discover())
+            _costs = config_mod.trade_costs_for(_cfg, req.symbol)
+        except Exception:
+            # 回退到默认值, 保证任务不因为 config 解析意外挂掉
+            _costs = {"buy_fee": 0.0001, "sell_fee": 0.0001,
+                      "sell_stamp_duty": 0.001, "slippage": 0.0001}
+        def _prog(i: int, n: int, score: float, info: dict) -> None:
+            pct = f"{i}/{n}" if n else f"{i}"
+            logging.info("[opt %s job=%s] %s score=%.4f tf=%s params=%s",
+                         req.mode, job_id[:6], pct, score,
+                         info.get("tf", ""), info.get("params", {}))
+            with _OPTIM_JOBS_LOCK:
+                j = _OPTIM_JOBS.get(job_id)
+                if j is None:
+                    return
+                hist = j.progress.setdefault("history", [])
+                if len(hist) < 500:
+                    hist.append(info)
+                else:
+                    hist.pop(0)
+                    hist.append(info)
+                j.progress["current"] = i
+                j.progress["total"] = n or 0
+                j.progress["latest_score"] = float(score)
+                j.progress["latest_info"] = info
+                j.progress["elapsed_ms"] = int((_dt.datetime.now().timestamp() - j.created_at) * 1000)
+        result = _po.run(
+            mode=req.mode, strategy=strat, symbol=req.symbol,
+            param_grid=req.param_grid or None,
+            timeframes=req.timeframes or None,
+            overrides=req.overrides or None,
+            metric=req.metric,
+            n_calls=req.n_calls, n_initial_points=req.n_initial_points,
+            base_estimator=req.base_estimator,
+            qfq=req.qfq, cash=req.cash,
+            fees=None,
+            buy_fee=_costs["buy_fee"], sell_fee=_costs["sell_fee"],
+            sell_stamp_duty=_costs["sell_stamp_duty"], slippage=_costs["slippage"],
+            limit=req.limit or None, top_n=req.top_n,
+            progress_cb=_prog,
+        )
+        with _OPTIM_JOBS_LOCK:
+            j = _OPTIM_JOBS.get(job_id)
+            if j is None:
+                return
+            j.status = "done"
+            d = _po.result_to_dict(result)
+            d["history"] = result.history  # 全部历史，API 返回时前端可画收敛曲线
+            j.result = _jsonify(d)
+            j.progress["elapsed_ms"] = int((_dt.datetime.now().timestamp() - j.created_at) * 1000)
+    except Exception as e:
+        tb = traceback.format_exc()
+        logging.error("[opt job=%s] 失败 %s: %s", job_id[:6], type(e).__name__, e)
+        with _OPTIM_JOBS_LOCK:
+            j = _OPTIM_JOBS.get(job_id)
+            if j is None:
+                return
+            j.status = "failed"
+            j.error = f"{type(e).__name__}: {e}\n{tb[:1500]}"
+
 # 前端 Next.js 在 localhost:3000, 允许跨域
 app.add_middleware(
     CORSMiddleware,
@@ -59,6 +208,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---- 全局异常 handler: 所有未捕获异常一律返回 JSON {detail: 完整错误+traceback}
+# 取代 uvicorn 默认的 "Internal Server Error" 纯文本, 便于前端显示和 debug
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    detail = f"{type(exc).__name__}: {exc}\n\n{tb}"
+    # 截断过长避免前端弹 2MB 错误
+    if len(detail) > 4000:
+        detail = detail[:2000] + "\n... [truncated] ...\n" + detail[-2000:]
+    _log = logging.getLogger("backend")
+    _log.error("[EXCEPTION] %s %s -> %s: %s\n%s",
+               request.method, request.url.path,
+               type(exc).__name__, exc, tb, exc_info=(type(exc), exc, exc.__traceback__))
+    print(f"[EXCEPTION] {request.method} {request.url.path} -> {type(exc).__name__}: {exc}",
+          file=sys.stderr, flush=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": detail, "error": type(exc).__name__, "message": str(exc)},
+    )
 
 
 # ================================================================ 工具 ====
@@ -95,7 +265,13 @@ def _jsonify(obj):
 # ================================================================ REST ====
 @app.get("/api/health")
 def health():
-    return {"ok": True, "time": _dt.datetime.now().isoformat()}
+    """服务探活: 前端每 5s 调用一次. fdata 状态 0.5s 超时快速检测, 不拖慢."""
+    return {
+        "ok": True,
+        "time": _dt.datetime.now().isoformat(),
+        "backend": True,
+        "fdata": is_server_available(),
+    }
 
 
 # --- 图会话持久化 (SQLite, 跨浏览器/设备共享) ---
@@ -159,12 +335,14 @@ class BacktestReq(BaseModel):
     tf: str = ""               # 指定周期 (空则用策略默认)
     qfq: bool = False
     cash: float = 100_000
+    limit: int = 0             # K线根数上限, 0 = 拉取全部
 
 
 @app.post("/api/backtest")
 async def run_backtest(req: BacktestReq):
     """vectorbt 回测: signal -> entries/exits -> vbt.Portfolio. 次日开盘口径.
 
+    手续费/滑点: 自动从 config.json 的 trade_costs 按 symbol 大类 (股票/期货/期权) 选取.
     兼容两种调用:
     - symbols=[...] (多标的, 批量回测)
     - symbol="sz159915" + tf="5m" (单标的, 图会话挂载策略按当前周期回测)
@@ -172,11 +350,23 @@ async def run_backtest(req: BacktestReq):
     strat = registry.get(req.strategy)
     tf = req.tf or getattr(strat, "TIMEFRAME", "day")
     syms = req.symbols or ([req.symbol] if req.symbol else [])
+    # 加载 config 并解析交易成本配置 (每个 symbol 单独解析: 可能跨大类)
+    strats_discovered = registry.discover()
+    cfg = config_mod.load(strats_discovered)
     out = {}
     for symbol in syms:
-        df = await asyncio.to_thread(_fetch, symbol, req.qfq, tf, 3000)
+        costs = config_mod.trade_costs_for(cfg, symbol)
+        df = await asyncio.to_thread(
+            _fetch, symbol, req.qfq, tf, req.limit or None)
         r = await asyncio.to_thread(
-            vbt_adapter.backtest, strat, df, req.params, req.cash)
+            vbt_adapter.backtest,
+            strat, df, req.params, req.cash,
+            fees=None,                                # 用新四项 (非 None 才走旧兜底)
+            buy_fee=costs["buy_fee"],
+            sell_fee=costs["sell_fee"],
+            sell_stamp_duty=costs["sell_stamp_duty"],
+            slippage=costs["slippage"],
+        )
         out[symbol] = _jsonify(r)
     return out
 
@@ -191,13 +381,100 @@ class OptimizeReq(BaseModel):
 
 @app.post("/api/optimize")
 async def optimize_params(req: OptimizeReq):
-    """参数网格搜索: 遍历 param_grid, 按 total_return 排序返回 top N."""
+    """参数网格搜索 (旧兼容端点): 按 symbol 大类取交易成本配置."""
     strat = registry.get(req.strategy)
     tf = getattr(strat, "TIMEFRAME", "day")
+    cfg = config_mod.load(registry.discover())
+    costs = config_mod.trade_costs_for(cfg, req.symbol)
     df = await asyncio.to_thread(_fetch, req.symbol, req.qfq, tf, 3000)
     r = await asyncio.to_thread(
-        vbt_adapter.optimize, strat, df, req.param_grid, req.cash)
+        vbt_adapter.optimize, strat, df, req.param_grid, req.cash,
+        fees=None,
+        buy_fee=costs["buy_fee"], sell_fee=costs["sell_fee"],
+        sell_stamp_duty=costs["sell_stamp_duty"], slippage=costs["slippage"],
+    )
     return _jsonify(r)
+
+
+class ParamOptimizeReq(BaseModel):
+    """新版参数优化: 支持网格 + 贝叶斯 + 多周期搜索."""
+    strategy: str
+    symbol: str
+    mode: str = "grid"                    # "grid" | "bayesian"
+    param_grid: dict = {}                 # grid 模式必传
+    timeframes: list[str] = []            # 可选，如 ["1m","2m","5m"]；空则用策略默认 TIMEFRAME
+    overrides: dict = {}                  # bayesian 模式用，收窄维度范围，如 {"rsi_fast": [4,6,8]} 或 {"oversold": {"lo":15,"hi":35}}
+    metric: str = "calmar"                # total_return / buyhold_alpha / sharpe / calmar / win_rate / calmar_alpha
+    n_calls: int = 50                     # bayesian 用
+    n_initial_points: int = 12
+    base_estimator: str = "GP"            # GP / ET / RF
+    qfq: bool = False
+    cash: float = 100_000
+    fees: float = 0.0001
+    limit: int = 0                        # 0 = 全量
+    top_n: int = 10
+
+
+@app.post("/api/param-optimize")
+async def param_optimize(req: ParamOptimizeReq):
+    """新版参数优化 API (同步). 自动从 config 取 symbol 对应大类的交易成本."""
+    strat = registry.get(req.strategy)
+    cfg = config_mod.load(registry.discover())
+    costs = config_mod.trade_costs_for(cfg, req.symbol)
+    def _progress(i: int, n: int, score: float, info: dict) -> None:
+        pct = f"{i}/{n}" if n else f"{i}"
+        logging.info("[opt %s] %s score=%.4f tf=%s params=%s",
+                     req.mode, pct, score, info.get("tf", ""), info.get("params", {}))
+    r = await asyncio.to_thread(
+        param_optimizer.run,
+        mode=req.mode, strategy=strat, symbol=req.symbol,
+        param_grid=req.param_grid or None,
+        timeframes=req.timeframes or None,
+        overrides=req.overrides or None,
+        metric=req.metric,
+        n_calls=req.n_calls, n_initial_points=req.n_initial_points,
+        base_estimator=req.base_estimator,
+        qfq=req.qfq, cash=req.cash,
+        fees=None,                         # 关闭旧兜底, 用新四项
+        buy_fee=costs["buy_fee"], sell_fee=costs["sell_fee"],
+        sell_stamp_duty=costs["sell_stamp_duty"], slippage=costs["slippage"],
+        limit=req.limit or None, top_n=req.top_n,
+        progress_cb=_progress,
+    )
+    return _jsonify(param_optimizer.result_to_dict(r))
+
+
+@app.post("/api/param-optimize/start")
+async def param_optimize_start(req: ParamOptimizeReq):
+    """提交异步参数优化任务, 返回 job_id. 前端用 /api/param-optimize/poll/{job_id} 轮询."""
+    job_id = _uuid.uuid4().hex[:12]
+    job = OptimJob(job_id=job_id, req=req)
+    with _OPTIM_JOBS_LOCK:
+        _cleanup_jobs()
+        _OPTIM_JOBS[job_id] = job
+    t = _th.Thread(target=_run_job_worker, args=(job_id,), daemon=True)
+    t.start()
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/api/param-optimize/poll/{job_id}")
+def param_optimize_poll(job_id: str):
+    """轮询进度/结果. running -> 返回 progress; done -> 返回 result; failed -> 返回 error."""
+    with _OPTIM_JOBS_LOCK:
+        j = _OPTIM_JOBS.get(job_id)
+    if j is None:
+        return JSONResponse(status_code=404, content={"error": "not_found",
+                            "message": f"任务 {job_id} 不存在或已过期"})
+    out = {
+        "job_id": j.job_id,
+        "status": j.status,
+        "progress": j.progress,
+    }
+    if j.status == "done":
+        out["result"] = j.result
+    elif j.status == "failed":
+        out["error"] = j.error
+    return out
 
 
 @app.get("/api/strategies/{name}/schema")
@@ -215,27 +492,55 @@ def get_strategy_schema(name: str):
 
 
 class ChartRunReq(BaseModel):
-    """新建图 -> 挂策略 -> 指定参数 -> 跑一轮 (新事件驱动链路)."""
+    """图会话 -> 挂策略 -> 跑一轮 (新事件驱动链路).
+
+    模式语义 (由前端 "实盘" checkbox 驱动):
+      - liveMode=ON  → mode="live" + dry_run=False (真实同花顺下单, 无 dry-run 兜底)
+      - liveMode=OFF → mode="paper"                (纸面模拟, 走 SimulatedBroker)
+    为兼容老前端请求, 保留 dry_run/mode 字段:
+      * 显式传 mode="live" 且 dry_run=True 时也生效 (仅旧版本前端用)
+    """
     strategy: str
     symbol: str
     params: dict = {}
-    mode: str = "live"           # backtest / paper / live
-    dry_run: bool = True
+    mode: str = "paper"          # paper / live
+    dry_run: bool = False        # 默认 False. 前端实盘 checkbox: ON=始终 False
     cash_per_symbol: float = 10_000.0
 
 
 @app.post("/api/charts/run")
 async def chart_run(req: ChartRunReq):
-    """图会话跑一轮: Runner.run_live(once=True) -> on_bar -> signal -> broker."""
+    """图会话跑一轮: Runner.run_live(once=True) -> on_bar -> signal -> broker.
+
+    语义保证 (对齐前端实盘 checkbox):
+      1. mode=paper → 永远用 SimulatedBroker, dry_run 字段被忽略
+      2. mode=live  → 用 LiveBroker:
+         * dry_run=True  (旧前端极少传, 只保留兼容): 填单但不确认
+         * dry_run=False (前端"实盘=ON" 时传这个): 真实扣款 & 提交订单
+    """
     strat = registry.get(req.strategy)
     from strategy.runtime.runner import Runner
+    # 防御性归一化: 如果前端传了 mode=live 但 dry_run=True 是"填单不提交",
+    # 按大王的最新要求, 这种组合在新 UI 不会出现; 即便出现也保留旧行为以安全兼容.
+    if req.mode == "paper":
+        runner_mode = "paper"
+        runner_dry = False
+    else:
+        runner_mode = "live"
+        runner_dry = bool(req.dry_run)
     runner = Runner(
         strategy=strat, symbol=req.symbol, params=req.params,
-        mode=req.mode, cash=req.cash_per_symbol * 10,
+        mode=runner_mode, cash=req.cash_per_symbol * 10,
         cash_per_symbol=req.cash_per_symbol,
-        dry_run=req.dry_run, fetch_fn=_fetch, poll_seconds=5.0,
+        dry_run=runner_dry, fetch_fn=_fetch, poll_seconds=5.0,
     )
     res = await runner.run_live(once=True)
+    # 把本请求实际使用的执行模式回传给前端, 便于日志/核对
+    res.setdefault("exec_mode", {
+        "mode": runner_mode,
+        "dry_run": runner_dry,
+        "broker": "LiveBroker(同花顺)" if runner_mode == "live" else "SimulatedBroker",
+    })
     # 附完整订单列表 (供前端画买卖 markers)
     res["orders"] = [
         {"order_id": o.order_id, "symbol": o.symbol, "side": o.side,
@@ -289,7 +594,7 @@ def get_evals(name: str, tail: int = 60):
 @app.get("/api/positions")
 async def get_positions():
     """同花顺实际持仓 (subprocess ths_trade)."""
-    cmd = [sys.executable, str(REPO_ROOT / "scripts" / "ths_trade.py"), "positions"]
+    cmd = [sys.executable, str(REPO_ROOT / "trading" / "ths_trade.py"), "positions"]
     r = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=120)
     try:
         return json.loads(r.stdout)
@@ -450,9 +755,9 @@ async def _tick_loop(symbols: list[str]):
             except Exception as e:
                 await _ws_mgr.broadcast(symbol, {"type": "error", "msg": str(e)})
 
-        # 节流: 依据自适应间隔减去已耗时
+        # 节流: 依据自适应间隔减去已耗时 (至少 1s 下限, 避免 fdata 慢/挂时 elapsed>interval 导致 sleep(0) 忙等 CPU 风暴)
         elapsed = _time.perf_counter() - t0
-        await asyncio.sleep(max(0.0, interval - elapsed))
+        await asyncio.sleep(max(1.0, interval - elapsed))
 
 
 _tick_task: Optional[asyncio.Task] = None
@@ -492,9 +797,11 @@ async def ws_market(ws: WebSocket):
 
     await _ws_mgr.connect(ws, symbols)
     try:
-        # 保持连接, 不读 (前端只收)
+        # 阻塞在 receive 上等客户端消息: 前端断开立即抛 WebSocketDisconnect
+        # (旧实现用 asyncio.sleep(30) 循环不感知断开, 导致 _ws_mgr.active 拋留已关闭 ws,
+        #  tick 循环误判"还有订阅者"持续空转抓行情 → CPU 风暴)
         while True:
-            await asyncio.sleep(30)
+            await ws.receive()
     except WebSocketDisconnect:
         pass
     finally:

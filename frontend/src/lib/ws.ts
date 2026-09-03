@@ -97,3 +97,57 @@ export class MarketWs {
 // 单例
 export const marketWs = typeof window !== "undefined" ? new MarketWs() : null;
 export type { TickMsg };
+
+// ================================================================ 流式测试 WS ===
+type MockBar = {
+  date: string; open: number; high: number; low: number;
+  close: number; volume: number; amount?: number;
+};
+
+type MockStreamMsg = {
+  type: "bar" | "info" | "error";
+  bar?: MockBar;
+  orders?: { side: "buy" | "sell"; qty: number; price: number; status: string; pnl?: number; ts?: string }[];
+  markers?: { date: string; price: number; action: "买入" | "卖出"; qty?: number; pnl?: number | null }[];
+  snapshot?: { cash: number; position: number; avg_cost?: number; equity?: number };
+  target?: number;
+  msg?: string;
+  error?: string;
+  pre_close?: number;   // 流式分时: 昨收价 (init info 消息带)
+};
+
+/** 一次性流式测试连接: 连上即推, 断开即停, 不重连. */
+export class MockStreamWs {
+  private ws: WebSocket | null = null;
+  private onMsg: (msg: MockStreamMsg) => void;
+  private onClose: () => void;
+
+  constructor(onMsg: (msg: MockStreamMsg) => void, onClose: () => void) {
+    this.onMsg = onMsg;
+    this.onClose = onClose;
+  }
+
+  start(symbol: string, strategy: string, tf: string, speed: string, params: Record<string, number>) {
+    this.stop();
+    const proto = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = typeof window !== "undefined" ? window.location.host : "localhost:3000";
+    const q = `symbol=${encodeURIComponent(symbol)}&strategy=${encodeURIComponent(strategy)}`
+            + `&tf=${encodeURIComponent(tf)}&speed=${encodeURIComponent(speed)}`
+            + `&params=${encodeURIComponent(JSON.stringify(params || {}))}`;
+    this.ws = new WebSocket(`${proto}//${host}/ws/mock_stream?${q}`);
+    this.ws.onmessage = (ev) => {
+      try { this.onMsg(JSON.parse(ev.data)); } catch {}
+    };
+    this.ws.onclose = () => this.onClose();
+    this.ws.onerror = () => { this.ws?.close(); };
+  }
+
+  stop() {
+    if (this.ws) {
+      this.ws.onclose = null;
+      this.ws.close();
+      this.ws = null;
+    }
+  }
+}
+

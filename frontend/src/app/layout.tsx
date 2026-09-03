@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Link from "next/link";
+// 组件自带 "use client" (独立的 Client Component), 可被 Server Component 直接静态导入
+import ServerStatusBadge from "@/components/ServerStatusBadge";
 
 export const metadata: Metadata = {
   title: "量化交易控制台",
@@ -8,7 +10,7 @@ export const metadata: Metadata = {
 };
 
 const nav = [
-  { href: "/live", label: "实盘策略", icon: "🚦" },
+  { href: "/charts", label: "图会话", icon: "📊" },
   { href: "/backtest", label: "回测", icon: "📈" },
   { href: "/config", label: "配置", icon: "⚙️" },
 ];
@@ -28,9 +30,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               {n.icon} {n.label}
             </Link>
           ))}
-          <div className="ml-auto text-xs text-[#666]">
-            Backend: <span className="text-[#26a69a]">●</span> FastAPI :8000
-          </div>
+          <ServerStatusBadge />
         </nav>
         <main className="p-6 max-w-[1600px] mx-auto">{children}</main>
       </body>

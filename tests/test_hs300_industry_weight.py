@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from scripts.hs300_industry_weight import (
+from data_analysis.hs300_industry_weight import (
     calculate_industry_weights,
     normalize_industry_dataframe,
     normalize_stock_code,

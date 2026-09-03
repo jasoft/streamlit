@@ -12,6 +12,6 @@ class Ma20Trend(Strategy):
     PARAMS = {"window": {"type": INT, "default": 20, "min": 5, "max": 120}}
     SYMBOLS = ["sz159915"]
 
-    def target_position(self, df: pd.DataFrame, params: dict) -> pd.Series:
+    def signal(self, df: pd.DataFrame, params: dict) -> pd.Series:
         ma = df["close"].rolling(int(params["window"])).mean()
         return (df["close"] > ma).astype(int).where(ma.notna(), 0)

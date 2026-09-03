@@ -81,7 +81,7 @@ echo "=============================================="
 # ================
 if [ -z "$NO_FDATA" ]; then
   echo ">>> 启动 fdata 数据网关 (端口 $FDATA_PORT)"
-  uv run python scripts/fdata.py serve --port "$FDATA_PORT" &
+  uv run python trading/fdata.py serve --port "$FDATA_PORT" &
   FDATA_PID=$!
   # 给 fdata 一点时间启动，避免后端刚起来时立刻回退到 CLI
   sleep 1
@@ -91,7 +91,7 @@ fi
 # 2) FastAPI 后端
 # ================
 echo ">>> 启动后端 FastAPI (端口 $BACKEND_PORT)"
-uv run uvicorn backend.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload &
+uv run uvicorn backend.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload --reload-dir backend --reload-dir strategy &
 UVICORN_PID=$!
 
 # ================

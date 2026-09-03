@@ -27,3 +27,125 @@ dependencies = [
     "uvicorn[standard]>=0.52.4",
     "websockets>=16.1.1",
 ]
+
+# =============================================================================
+# 🔧 Poe the Poet —— 快捷命令 (直接运行: poe <task> [args...])
+#   查看所有任务: poe --help   查看单任务: poe -h <task>   预览不执行: poe -d <task>
+#   所有任务的额外参数会自动追加到命令末尾，无需占位符
+# =============================================================================
+
+# ──────────────────────────────────────────────
+# 🔌 数据网关：fdata
+# ──────────────────────────────────────────────
+
+[tool.poe.tasks.fdata-serve]
+cmd  = "python trading/fdata.py serve"
+help = "启动 fdata TCP 长连接网关 (默认端口 9701, 可用 --port 覆盖)"
+
+[tool.poe.tasks.fdata-quote]
+cmd  = "python trading/fdata.py quote"
+help = "实时快照:  poe fdata-quote sz159915 600519"
+
+[tool.poe.tasks.fdata-kline]
+cmd  = "python trading/fdata.py kline"
+help = "K线:  poe fdata-kline sz159915 --period 5m --limit 200"
+
+[tool.poe.tasks.fdata-doctor]
+cmd  = "python trading/fdata.py doctor"
+help = "10 项数据源连通性自检"
+
+[tool.poe.tasks.fdata-watch]
+cmd  = "python trading/fdata.py watch"
+help = "实时盯盘回调:  poe fdata-watch rb sz159915 --interval 1 --strategy trading/example_tick_strategy.py"
+
+# ──────────────────────────────────────────────
+# 💰 交易查询 & 账户  (同花顺 Mac GUI)
+# ──────────────────────────────────────────────
+
+[tool.poe.tasks.trade-positions]
+cmd  = "python trading/ths_trade.py positions"
+help = "查持仓 (~220ms, 可选 --account real/sim)"
+
+[tool.poe.tasks.trade-orders]
+cmd  = "python trading/ths_trade.py orders"
+help = "查委托 (默认只查今天, 可选 --all)"
+
+[tool.poe.tasks.trade-trades]
+cmd  = "python trading/ths_trade.py trades"
+help = "查成交"
+
+[tool.poe.tasks.trade-funds]
+cmd  = "python trading/ths_trade.py funds"
+help = "查资金明细"
+
+[tool.poe.tasks.trade-account]
+cmd  = "python trading/ths_trade.py switch-account"
+help = "切账户:  poe trade-account real  |  poe trade-account sim"
+
+# ──────────────────────────────────────────────
+# 🔔 条件单引擎
+# ──────────────────────────────────────────────
+
+[tool.poe.tasks.condition-sim]
+cmd  = "python trading/condition_orders.py"
+help = "条件单 模拟模式 (安全, 不真实下单, 默认 --poll 5s)"
+
+[tool.poe.tasks.condition-live]
+cmd  = "python trading/condition_orders.py --live"
+help = "条件单 实盘模式 (真实下单, 谨慎! 默认 --poll 5s)"
+
+# ──────────────────────────────────────────────
+# 📊 看板 (Streamlit)
+# ──────────────────────────────────────────────
+
+[tool.poe.tasks.dashboard-analysis]
+cmd  = "streamlit run data_analysis/stockview/app.py"
+help = "📈 数据分析综合看板 (行业权重/ETF信号/资金流向/分时图)"
+
+[tool.poe.tasks.dashboard-trade]
+cmd  = "streamlit run strategy/dashboard.py"
+help = "🤖 自动化交易系统看板 (回测/实盘策略/配置)"
+
+# ──────────────────────────────────────────────
+# 🚀 全栈开发启动
+# ──────────────────────────────────────────────
+
+[tool.poe.tasks.dev]
+cmd  = "bash dev.sh"
+help = "一键本地开发: fdata(:9701) + FastAPI(:8000) + Next.js(:3001)  (Ctrl-C 停止)"
+
+[tool.poe.tasks.dev-backend]
+cmd  = "uvicorn backend.main:app --reload --port 8000"
+help = "仅启动 FastAPI 后端 (--reload, 默认 :8000)"
+
+[tool.poe.tasks.dev-frontend]
+cmd  = "bash -c 'cd frontend && npm run dev'"
+help = "仅启动 Next.js 前端 (默认 :3001)"
+
+[tool.poe.tasks.start]
+cmd  = "bash start.sh"
+help = "生产环境启动 (nginx + 后端前端)"
+
+[tool.poe.tasks.deploy]
+cmd  = "bash deploy.sh"
+help = "部署到服务器"
+
+# ──────────────────────────────────────────────
+# 🔬 分析工具
+# ──────────────────────────────────────────────
+
+[tool.poe.tasks.analysis-hs300]
+cmd  = "python data_analysis/hs300_industry_weight.py"
+help = "沪深300行业权重分析"
+
+[tool.poe.tasks.analysis-intraday]
+cmd  = "python data_analysis/intraday/analyze_and_backtest.py"
+help = "日内策略分析 + 回测报告"
+
+[tool.poe.tasks.optimize-grid]
+cmd  = "python data_analysis/optimize_params.py grid"
+help = "网格参数优化:  poe optimize-grid intraday_t sz159915 --grid rsi_fast=4,6,8 --timeframes 1m,5m"
+
+[tool.poe.tasks.optimize-bayesian]
+cmd  = "python data_analysis/optimize_params.py bayesian"
+help = "贝叶斯参数优化:  poe optimize-bayesian intraday_t sz159915 --n-calls 60"

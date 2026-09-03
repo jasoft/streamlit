@@ -27,7 +27,7 @@ INIT_CASH = 100_000
 def subprocess_positions():
     import subprocess as sp
     r = sp.run([sys.executable, str(Path(__file__).resolve().parent.parent
-                                    / "scripts" / "ths_trade.py"), "positions"],
+                                    / "trading" / "ths_trade.py"), "positions"],
                capture_output=True, text=True, timeout=120)
     try:
         return json.loads(r.stdout)

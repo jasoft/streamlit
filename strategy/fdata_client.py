@@ -1,88 +1,46 @@
 #!/usr/bin/env python3
 """fdata 数据源统一客户端.
 
-优先走 `fdata serve` 长连接 (进程内常驻 eltdx client, 连接复用, 无每次初始化开销);
-服务器不可用时自动回退到 fdata CLI (subprocess), 保证功能不被单点卡死.
+走 `fdata serve` 长连接 (进程内常驻 eltdx client, 连接复用, 无每次初始化开销);
+serve 不可用直接抛 ServerUnavailable, 不回退 CLI (CLI 每次 subprocess 冷开销大, 仅供 Agent 用).
 
 返回结构与 fdata JSON 同构; quote/kline 均归一化到简单结构.
 串行客户端单例, 线程安全由调用方 (backend asyncio.to_thread / 条件单 asyncio.to_thread)
 保证单协程内调用, 连接复用 + 断线自动重连.
 
 数据来源标识:
-  - 服务器模式: source = "eltdx(serve)";  复用同一 TCP 连接
-  - CLI 回退:   source = "eltdx(cli)";   每次 subprocess
+  - eltdx 类型: source = "eltdx(serve)";  复用同一 TCP 连接
+  - 非 eltdx 透传: source = "<argv[0]>(serve)";  走 serve 的 cli op
 """
 from __future__ import annotations
 
 import json
 import os
 import socket
-import subprocess
-import sys
-import time
-from pathlib import Path
+import threading
 
-REPO = Path(__file__).resolve().parent.parent
-FDATA_CLI = REPO / "scripts" / "fdata.py"
 _HOST = os.environ.get("FDATA_HOST", "127.0.0.1")
 _PORT = int(os.environ.get("FDATA_PORT", "9701"))
 _TIMEOUT = float(os.environ.get("FDATA_TIMEOUT", "8"))
 _MAX_LINE = int(os.environ.get("FDATA_MAXLINE", 16 << 20))  # 16MB 响应上限
 
-# 防雪崩熔断与限频状态
-_last_fallback_warn_time: float = 0.0
-_last_cli_call_time: float = 0.0
-_cli_call_history: list[float] = []
-
-
-def _throttle_cli_fallback(action: str) -> None:
-    """CLI 回退模式下的防雪崩节流器.
-
-    当 fdata serve 未启动时, 高频轮询 (如 1s tick) 会频繁创建独立 Python 解释器,
-    导致严重的系统 CPU 调度风暴 (Load Average 飙升).
-    本函数提供:
-      1) 15s 频控告警输出
-      2) 最小调用间隔平滑节流
-      3) 高频突发时的强制背压 (Backpressure)
-    """
-    global _last_fallback_warn_time, _last_cli_call_time, _cli_call_history
-    now = time.time()
-
-    # 1. 周期性告警 (15s 一次, 避免刷屏)
-    if now - _last_fallback_warn_time > 15.0:
-        _last_fallback_warn_time = now
-        print(
-            f"[fdata_client] ⚠️ fdata serve (:{_PORT}) 未启动，正在回退到 CLI 模式 ({action})。\n"
-            f"             单次 CLI 启动冷开销较大，高频调用建议启动常驻服务:\n"
-            f"             uv run python scripts/fdata.py serve --port {_PORT}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    # 2. 最小调用间隔节流 (至少间隔 100ms)
-    elapsed = now - _last_cli_call_time
-    if elapsed < 0.1:
-        time.sleep(0.1 - elapsed)
-        now = time.time()
-    _last_cli_call_time = now
-
-    # 3. 滑动窗口限频 (过去 3s 内超过 6 次 CLI 调用则强制背压 300ms)
-    _cli_call_history = [t for t in _cli_call_history if now - t < 3.0]
-    _cli_call_history.append(now)
-    if len(_cli_call_history) > 6:
-        time.sleep(0.3)
-
 
 class ServerUnavailable(Exception):
-    """fdata serve 不可用 (未启动/断线), 调用方应回退到 CLI."""
+    """fdata serve 不可用 (未启动/断线); 直接抛错, 不回退 CLI (CLI 开销大仅供 Agent 用)."""
 
 
 class FdataClient:
-    """TCP line-JSON 客户端: 连接复用 + 断线重连."""
+    """TCP line-JSON 客户端: 连接复用 + 断线重连 + 线程锁.
+
+    全局单例被 backend 多线程 (asyncio.to_thread) 和 tick 循环并发调用,
+    单个 socket 的 send/recv 必须串行, 否则响应 buffer 互相污染导致
+    "server returned non-JSON" / "server gone" 假阳性.
+    """
 
     def __init__(self) -> None:
         self._sock: socket.socket | None = None
         self._buf: bytes = b""   # 跨请求复用: 一次 recv 可能多读, 保留供下一行用
+        self._lock = threading.Lock()
         self.source = "unset"
 
     def close(self) -> None:
@@ -114,24 +72,29 @@ class FdataClient:
         return line.strip().decode("utf-8", "replace")
 
     def request(self, req: dict) -> dict:
-        """请求服务器, 失败抛 ServerUnavailable (会重置连接)."""
-        if self._sock is None:
+        """请求服务器, 失败抛 ServerUnavailable (会重置连接).
+
+        全程持锁: sendall + recv 必须原子, 否则多线程交叉 send 会使
+        对应 recv 读到别条请求的响应, 导致 non-JSON / buffer 污染.
+        """
+        with self._lock:
+            if self._sock is None:
+                try:
+                    self._sock = socket.create_connection((_HOST, _PORT), _TIMEOUT)
+                    self._sock.settimeout(_TIMEOUT)
+                    self.source = "eltdx(serve)"
+                except OSError as e:
+                    raise ServerUnavailable(f"connect {_HOST}:{_PORT} failed: {e}") from None
             try:
-                self._sock = socket.create_connection((_HOST, _PORT), _TIMEOUT)
-                self._sock.settimeout(_TIMEOUT)
-                self.source = "eltdx(serve)"
-            except OSError as e:
-                raise ServerUnavailable(f"connect {_HOST}:{_PORT} failed: {e}") from None
-        try:
-            self._sock.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode())
-            return json.loads(self._recv_line())
-        except (OSError, socket.timeout, ServerUnavailable):
-            self.close()
-            raise ServerUnavailable("server gone")
-        except (json.JSONDecodeError, ValueError):
-            # 响应被截断/损坏: 连接已进入不一致状态, 重置后让上层走 CLI 回退
-            self.close()
-            raise ServerUnavailable("server returned non-JSON")
+                self._sock.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode())
+                return json.loads(self._recv_line())
+            except (OSError, socket.timeout, ServerUnavailable):
+                self.close()
+                raise ServerUnavailable("server gone")
+            except (json.JSONDecodeError, ValueError):
+                # 响应被截断/损坏: 连接已进入不一致状态, 重置后下条请求自动重连
+                self.close()
+                raise ServerUnavailable("server returned non-JSON")
 
 
 _client = FdataClient()
@@ -147,7 +110,7 @@ def quote(code: str) -> dict | None:
 
     无成交或无数据时 last 可能为 None, 返回该 dict (勿误判).
     """
-    resp = _request({"op": "quote", "code": code}, ["quote", code])
+    resp = _request({"op": "quote", "code": code})
     q = _flat_quote(resp)
     if q is not None:
         return q
@@ -162,24 +125,18 @@ def kline(code: str, period: str = "day", kind: str = "stock",
                  "kind": kind, "limit": limit}
     if adjust:
         req["adjust"] = adjust
-    cli_cmd = ["kline", code, "--period", period, "--kind", kind]
-    if adjust:
-        cli_cmd += ["--adjust", adjust]
-    # CLI 默认 --limit 30; 统一语义: limit 为空 => 全历史 (与 serve 缺失 limit 一致), 传 --limit 0
-    cli_cmd += ["--limit", str(limit if limit else 0)]
-    resp = _request(req, cli_cmd)
+    resp = _request(req)
     if not resp:
         return []
     # serve: {"ok": True, "result": {"code","kind","count","data":[...]}}
     # serve ok=False: {"ok": False, "error": "..."}
-    # CLI fallback: {"data":[...]}  或 {"result": {"data":[...]}}
     if resp.get("ok") is False and resp.get("error"):
         raise RuntimeError(f"fdata kline {code} {period} failed: {resp['error']}")
     if resp.get("ok"):
         result = resp.get("result") or {}
         if isinstance(result, dict) and "data" in result:
             return result["data"]
-    # CLI fallback 路径: 直接有 data key, 或 result.data
+    # 兜底: 直接有 data key, 或 result.data (serve cli op 透传格式)
     if "data" in resp and isinstance(resp["data"], list):
         return resp["data"]
     result = resp.get("result")
@@ -199,43 +156,23 @@ def is_server_available() -> bool:
 
 
 def cli(argv: list[str], timeout: int = 180) -> dict:
-    """通用子命令 (期货/基金/期权/新闻等): 与 fdata CLI 输出完全一致.
+    """通用子命令 (期货/基金/期权/新闻等): 走 serve 的 cli op 透传, 与 fdata CLI 输出一致.
 
-    服务器模式 -> 透传 fdata 自身 CLI; 服务器不可用 -> 本地 subprocess 回退.
+    serve 不可用直接抛 ServerUnavailable (不回退本地 subprocess, CLI 开销大仅供 Agent 用).
     argv 如 ["futures", "rb"] / ["news"] / ["na", "004075"].
     """
     argv = [str(a) for a in argv]
     req: dict = {"op": "cli", "argv": argv, "timeout": timeout}
-    try:
-        resp = _client.request(req)
-    except ServerUnavailable:
-        resp = None  # 走 CLI 回退
-    if resp is not None:
-        if resp.get("ok"):
-            _client.source = f"{argv[0]}(serve)"
-            return resp["result"]
-        raise RuntimeError(f"fdata server cli {argv[0]} failed: {resp.get('error')}")
-    _throttle_cli_fallback(f"cli {argv[0] if argv else ''}")
-    r = subprocess.run([sys.executable, str(FDATA_CLI), *argv],
-                       capture_output=True, text=True, timeout=timeout)
-    if r.returncode != 0:
-        raise RuntimeError(f"fdata CLI failed (src={argv[0]}): {r.stderr.strip()[:300]}")
-    _client.source = f"{argv[0]}(cli)"
-    return json.loads(r.stdout)
+    resp = _client.request(req)
+    if resp.get("ok"):
+        _client.source = f"{argv[0]}(serve)"
+        return resp["result"]
+    raise RuntimeError(f"fdata server cli {argv[0]} failed: {resp.get('error')}")
 
 
-def _request(req: dict, cli: list[str]) -> dict | None:
-    try:
-        return _client.request(req)
-    except ServerUnavailable:
-        pass  # 回退 CLI
-    _throttle_cli_fallback(f"{cli[0]} {cli[1] if len(cli) > 1 else ''}")
-    r = subprocess.run([sys.executable, str(FDATA_CLI), *cli],
-                       capture_output=True, text=True, timeout=120)
-    if r.returncode != 0:
-        raise RuntimeError(f"fdata CLI failed (src={cli[0]}): {r.stderr.strip()[:300]}")
-    _client.source = "eltdx(cli)"
-    return json.loads(r.stdout)
+def _request(req: dict) -> dict:
+    """请求 serve, 不可用直接抛 ServerUnavailable (不回退 CLI, CLI 开销大仅供 Agent 用)."""
+    return _client.request(req)
 
 
 def _flat_quote(resp: dict | None) -> dict | None:

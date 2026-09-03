@@ -1,167 +1,407 @@
-# 项目交接文档 — streamlit 量化/行情项目
+# 项目交接文档 — 量化交易系统
 
-> 生成于 2026-08-31。本文档汇总了用户与 AI Agent 在本项目中的全部协作历史、决策结论、踩坑记录与当前工作区状态，供下一个 Agent 无缝接手。**接手前请完整阅读，尤其是"数据源避坑"和"同花顺 GUI 自动化"两节——里面每一条都是实测踩出来的，违反会直接导致功能失效或被封 IP。**
+> 生成于 2026-09-02。本文档汇总项目全部协作历史与决策结论，供下一个 Agent 无缝接手。
+> **上手路径**：先看「一、项目演进史」定位当前阶段 → 读「二、当前架构」理解六大子系统 → 查「九、常见坑速查」对应问题 → 查「八、硬约束 13 条」确认不违规。
+> **完整详细手册见项目根目录 `SKILL.md`（863 行 17 章）**，本文件是精简交接版 + 演进脉络。
 
 ---
 
 ## 一、项目是什么 & 演进史
 
-项目位于 `/Users/weiwang/Projects/streamlit`（git 仓库，分支 main，共 120 个提交），从最早一个 Streamlit A股行情可视化面板（2024 年 "first commit"）逐步演进为一条**完整的个人量化交易链路**：
+项目路径: `/Users/weiwang/Projects/streamlit`。从 Streamlit 行情面板演进为**完整的个人量化交易全链路**（六大子系统）。用户场景：A 股/ETF 个人量化，低频日线策略 + 日内做 T 探索，实盘账户国泰海通（同花顺 Mac 客户端）+ 模拟练习账户。
 
-1. **stockview/** — Streamlit 市场行情 Dashboard（首页决策仪表盘、ETF 五因子信号、期权、拥挤度、行业资金流等页面），Docker + Nginx 反代部署过远程服务器。
-2. **数据源迁移**（2026-08-30）— 因 akshare 新浪/东财 HTTP 源频繁被限频封禁，行情类数据迁移到 **eltdx**（通达信协议），并封装成统一 CLI **fdata**。
-3. **交易链路**（2026-08-30）— miniqmt 不可用，改用 GUI 自动化驱动**同花顺 Mac 客户端**下单，脚本 `scripts/ths_trade.py`。
-4. **strategy/** 自动化交易系统（2026-08-30 建成）— 策略零注册/回测/实盘启停/接 ths_trade 下单，默认 dry-run。
-5. **开源量化框架调研**（2026-08-30）— 见 `docs/quant-framework-report.md`，结论：vectorbt（参数扫描）+ backtrader（事件驱动复现）组合，尚未引入。
+演进里程碑（按时间倒序，最新优先）：
 
-用户目标场景：A 股/ETF 个人量化，低频日线策略为主 + 日内做 T 探索，实盘账户为**国泰海通**（同花顺客户端），另有"模拟练习"模拟账户。
+**阶段 7 — 前端重写 + 后端 API 化（2026-09-01 ~ 09-02，当前主架构）**
+- 前端从 Streamlit 实盘页 → **Next.js 15 + ECharts 6** 重写，路由 `/charts` / `/backtest` / `/config`；根路径 `/` 重定向到 `/charts`（旧 `/live` 实盘策略页面已删除）
+- 后端新建 `backend/main.py`（FastAPI）：REST `/api/*` + WebSocket `/ws/market`（每秒tick推送）+ `/ws/mock_stream`（流式测试逐根推bar）
+- 图表会话持久化到 `backend/charts.db`（SQLite），跨浏览器/设备共享
+- 前端新增全局数字格式化 `frontend/src/lib/fmt.ts`（股价三位小数/金额千分位/百分比两位 + 参数统计中英文转换）
+- 启动脚本 `dev.sh` 一键起后端+前端（Ctrl-C 同停），支持 BACKEND_PORT/FRONTEND_PORT 自定义
 
-## 二、当前项目结构与文件状态
+**阶段 6 — ths_trade 高速查询优化 + 账户切换拆分（2026-09-02）**
+- positions/orders/trades/funds 从 ~1.3s 优化到 ~220ms（6x）：深度限制 DFS 直接 AXTable 语义定位 + 30ms 轮询 AXRow 稳定性替代固定 sleep(0.5)
+- 高频命令和低频操作彻底分离：查询命令**无 flag 零冗余检查**（去掉 --account/--no-login/登录校验），新增独立 `switch-account real/sim` 子命令负责切账户+自动登录，放周期性调度不影响 API 性能
+- 下单失败 Bark 通知：券商拒单结果弹窗（含"警告/错误/失败/不足/不允许/拒绝"）或提交后状态未知超时 → 通过 Bark key `THS_BARK_KEY` 立即推送到用户手机
+
+**阶段 5 — fdata 长连接 + 统一客户端（2026-09-02）**
+- fdata.py 新增 `serve --port 9701` 子命令：TCP line-JSON 协议，进程内常驻单个 eltdx client 连接复用，全局锁并发安全，自动断线重连
+- 新建 `strategy/fdata_client.py` 统一客户端：优先走 serve 长连接（source="eltdx(serve)"），失败自动回退 subprocess CLI（"eltdx(cli)"），调用方完全无感
+- `quote()` 自动路由全部品种：股票/ETF/指数 → serve 高频长连接；期货/基金/期权/外盘 → 自动降级 CLI quote 路由
+- 多客户端并发支持：asyncio.start_server 每连接独立协程；非 eltdx 类型通用 `cli` 请求类型透传 fdata 自身 CLI，字节级一致
+
+**阶段 4 — 条件单引擎（2026-09-02）**
+- `trading/condition_orders.py`：多条件单 `asyncio.gather` 异步并发，每个单用独立状态机
+- 状态：`WATCH`（开盘前3分钟内跌破阈值买）→ `ARMED`（等待反弹卖）→ `DONE`（结束）
+- 行情入口：统一走 `fdata_client.quote(last/pre_close)`；同花顺行情连接未恢复时保持 WATCH 不下单
+- 记账复用 runtime 层（Portfolio + Broker + ctx.submit_order），支持 SimulatedBroker / LiveBroker
+
+**阶段 3 — runtime 三层重构 + vectorbt 回测（2026-08-31 ~ 09-01）**
+- `strategy/runtime/` 三层架构：`Portfolio`（现金/持仓target与qty分离/订单/state.json）+ `Context`（策略看到的世界）+ `Broker`（Backtest/Simulated/Live 三种实现）
+- 订单状态机：`pending_submit → submitted → partial_filled → filled | cancelled | rejected`，轮询模型监控
+- `strategy/backtest/vbt_adapter.py` 取代原 `engine.py` 成为主回测路径：strategy.signal → entries/exits shift(1) + price=open → vbt.Portfolio（收盘出信号次日开盘成交，无未来函数）
+- Strategy 基类双接口：`signal(df, params)`（向量化，给 vbt 回测/优化）+ `on_bar(bar, ctx)`（事件驱动，给实盘），默认 on_bar 自动桥接 signal；`target_position` 是旧名保留别名
+
+**阶段 2 — ths_trade 自动交易闭环（2026-08-30）**
+- macOS AX API 纯后台驱动同花顺 Mac 客户端，代码框聚焦→填值联动带出对手价，绝不激活窗口前台（防反自动化封禁 -25212）
+- 子命令：buy/sell/cancel/positions/orders/trades/funds/login + --dry-run，JSON 输出
+- 自动登录：.env THS_USER/THS_PASS，断连后抢按钮（轮询 0.05s）
+
+**阶段 1 — 数据源迁移 + strategy 初建 + Streamlit 看板（2026-08-30）**
+- fdata.py 统一 CLI：股票/ETF/指数 → eltdx 通达信 7709；期货 → tqsdk/新浪 nf_；ETF 期权 → 新浪 CON_OP_；基金 → 东财
+- strategy/ 雏形：target_position + engine.py 自研回测 + trader.py 实盘 + dashboard.py（Streamlit 三页看板）
+- stockview/：旧 Streamlit 行情 Dashboard（保留，非主流程），市场面板/五因子信号/资金流向/行业权重/拥挤度等
+
+---
+
+## 二、当前架构（六大子系统，9/2 最新）
 
 ```
-stockview/            Streamlit 应用主体
-  main.py (~1044行)   首页决策仪表盘（市场状态评分、估算两市成交额 get_estimate_amount、迷你分时图等）
-  etf_signal.py       创业板ETF(159915) 五因子买卖信号面板（快照+日K，已迁 eltdx）
-  options.py          ETF 期权 T 型报价/希腊字母/IV（akshare 新浪通道）
-  congestion.py / fund_flow.py / hs300_industry.py / index_*.py / if_im_strategy.py
-  db_helper.py        SQLite 结构化存储（market_data.db，市场面板历史趋势）
-  tdx_source.py       通达信(eltdx)数据源封装
-  debug_*.py / check_names.py / test_*.html   调试脚本（未提交）
-
-scripts/
-  fdata.py (~1661行)  ★ 统一金融数据 CLI，12+ 子命令，详见第三节
-  ths_trade.py        ★ 同花顺 Mac GUI 自动交易，详见第四节
-  example_tick_strategy.py / test_realtime_rate.py   watch 子命令示例与压测
-
-strategy/             自动化交易系统，详见第五节
-datasource_test/      2026-08-30 数据源实测报告 REPORT.md + 测试脚本 + results*.json
-docs/
-  quant-framework-report.md   开源量化框架调研报告（vectorbt/backtrader 实测）
-  AGENT_HANDOFF.md            本文档
-tests/test_strategy_system.py   strategy 系统单测（uv run python -m unittest tests.test_strategy_system）
-market_data.db        SQLite 行情/面板历史库
+┌───────────────────────────────────────────────────────────────────┐
+│  Next.js 前端 (:3001)        后端 rewrite 结果, 替代 Streamlit 看板  │
+│  /charts 多图会话 + 策略挂载 + 流式测试 (KLineChart/IntradayChart)  │
+│  /backtest 批量回测 + 参数优化       /config 策略参数配置            │
+│  ECharts 6 canvas setOption 增量更新 (无闪烁)                       │
+│  fmt.ts 统一格式化 / api.ts REST / ws.ts MarketWs+MockStreamWs     │
+└────────────┬───────────────────────────────────────┬───────────────┘
+     rewrite │ /api/* /ws/*                          │ next.config.ts
+             ▼                                       ▼
+┌───────────────────────────────────────────────────────────────────┐
+│  FastAPI 后端 (:8000)    backend/main.py (15+ REST + 2 WebSocket) │
+│  全部阻塞调用 asyncio.to_thread() 包装, 绝不卡事件循环              │
+│  /api/backtest + vbt_adapter  │  /api/kline /api/intraday         │
+│  /api/positions (ths_trade)   │  /api/charts/sessions (SQLite)    │
+│  /ws/market 每秒 tick (默认 sz159915, sh510300, sh000001)         │
+│  /ws/mock_stream 流式逐根 bar + 实时策略 + paper 成交              │
+└────────┬──────────────────────┬──────────────────────┬────────────┘
+         │ 取数                  │ 策略                 │ 下单
+         ▼                       ▼                      ▼
+┌──────────────────┐  ┌──────────────────┐  ┌────────────────────────┐
+│ fdata 数据网关    │  │ strategy 策略层   │  │ ths_trade 同花顺交易    │
+│ trading/fdata.py  │  │ base.py 双接口   │  │ trading/ths_trade.py    │
+│  serve模式 9701   │  │ runtime/ 三层    │  │ AX API 后台 ~220ms 查询 │
+│  TCP 长连接复用   │  │ vbt_adapter.py   │  │ switch-account 切账户   │
+│  CLI 自动回退     │  │ 零注册自动发现    │  │ Bark 通知下单失败      │
+│ fdata_client.py   │  │ config.json 配置 │  │ buy/sell/cancel/…      │
+└──────────────────┘  └──────────────────┘  └────────────────────────┘
+         ▲                                               ▲
+         └──────────── condition_orders.py ─────────────┘
+                    条件单引擎: WATCH → ARMED → DONE
 ```
 
-**工作区未提交内容（git status）**：`strategy/`、`scripts/ths_trade.py`、`datasource_test/`、`docs/`、`tests/test_strategy_system.py`、`scripts/fdata.py` 的 watch 等新增（+223 行 diff）均**未提交**；pyproject.toml/uv.lock 有改动（tqsdk、pyobjc 等新依赖）。market_data.db 在仓库目录下。**注意：.env 已从 git untrack 并 gitignore，但历史提交中 .env 里的 TUSHARE_TOKEN/IWENCAI_API_KEY 仍在 git 历史里，若仓库公开建议轮换。**
+---
 
-## 三、数据源体系（核心决策 + 避坑）
+## 三、快速启动
 
-### 3.1 选型总表（2026-08-30 实测，报告在 datasource_test/REPORT.md）
+```bash
+cd /Users/weiwang/Projects/streamlit
+uv sync                         # 装 Python 依赖 (首次)
+cd frontend && npm install       # 装前端依赖 (首次)
 
-| 品类 | 稳定方案 | 不要用 |
+# 终端1: 启 fdata 长连接 (可选, 不启自动走 CLI 慢些)
+uv run python trading/fdata.py serve --port 9701
+
+# 终端2: 一键启前后端
+./dev.sh          # 后端 :8000 + 前端 :3001, Ctrl-C 同停
+# 访问 http://localhost:3001 → /charts
+```
+
+验证：
+```bash
+curl http://localhost:8000/api/health                              # 健康
+curl "http://localhost:8000/api/kline?symbol=sz159915&tf=day&limit=3" # K线
+uv run python trading/fdata.py quote sz159915                      # 快照
+uv run python trading/ths_trade.py positions                        # 同花顺持仓 (需开着)
+uv run python trading/condition_orders.py --poll 5                 # 条件单模拟
+```
+
+---
+
+## 四、目录结构速查（9/2）
+
+```
+/Users/weiwang/Projects/streamlit/
+├── SKILL.md                  ★ 863 行完整手册 (给 AI Agent 接手用)
+├── dev.sh                    一键启 FastAPI(:8000) + Next.js(:3001), Ctrl-C 同停
+├── pyproject.toml            Python 依赖 (uv sync)
+├── Dockerfile / nginx.conf / deploy.sh / start.sh   生产部署 (远期, 未闭环)
+│
+├── frontend/                 ★ Next.js 15 前端 (核心 UI)
+│   ├── next.config.ts        rewrite: /api/*→:8000/api/*, /ws/*→:8000/ws/*
+│   └── src/
+│       ├── app/page.tsx      根 / → 重定向 /charts
+│       ├── app/charts/page.tsx   多图会话 + 策略挂载 + 流式测试 + 账户快照
+│       ├── app/backtest/page.tsx 批量回测 + 参数网格
+│       ├── app/config/page.tsx   策略参数配置 (写 config.json)
+│       ├── components/KLineChart.tsx     ECharts K线 (拖拽缩放/双轨日期marker)
+│       ├── components/IntradayChart.tsx  分时 (白价格线+黄VWAP+染色量柱)
+│       ├── components/ParamForm.tsx       schema 驱动参数表单
+│       ├── lib/api.ts  REST 封装
+│       ├── lib/ws.ts   MarketWs (tick推送, 自动重连) + MockStreamWs (流式)
+│       └── lib/fmt.ts  ★ 全局格式化: fmtPrice/fmtMoney/fmtPct/fmtNum/paramCn/statCn/formatStat
+│
+├── backend/                  ★ FastAPI 后端
+│   ├── main.py               全部 REST + WebSocket 端点 (~600 行)
+│   ├── store.py              图会话 SQLite 持久化 (charts/sessions)
+│   └── charts.db             SQLite 数据库
+│
+├── strategy/                 ★ 策略框架
+│   ├── base.py               Strategy 基类: signal() 向量化 + on_bar() 事件驱动 双接口
+│   ├── registry.py           策略自动发现 (零注册)
+│   ├── config.py             config.json 读写
+│   ├── manager.py            策略进程 start/stop/status CLI
+│   ├── fdata_client.py       ★★ 统一取数入口 (serve 优先/CLI 回退/自动路由全品种)
+│   ├── trader.py             旧实盘执行器 (取数入口已迁 fdata_client)
+│   ├── mock_market.py        Mock 市场 (流式测试逐根 advance_bar)
+│   │
+│   ├── backtest/vbt_adapter.py  ★ vectorbt 回测适配器 (主回测路径, 取代 engine.py)
+│   │                           entries/exits shift(1) + price=open → 次日开盘成交
+│   ├── runtime/              ★ 策略运行时三层
+│   │   ├── portfolio.py      Portfolio: 现金/持仓(qty实 vs target意图分离)/订单/state.json
+│   │   ├── ctx.py            Context: 策略看到的世界 (history/qty_for/submit_order)
+│   │   ├── broker.py         三种 Broker: Backtest(待次日open) / Simulated(立即fill) / Live(ths_trade+轮询)
+│   │   └── runner.py         Runner.run_live 事件驱动单轮执行
+│   │
+│   └── strategies/           放进去自动注册
+│       ├── ma20_trend.py     MA20 趋势 (日线)
+│       ├── sma_cross.py      SMA 金叉死叉 (日线)
+│       ├── intraday_t.py     日内做 T (5m, 参数待调优)
+│       └── tick_buy_sell.py  tick 级策略模板
+│
+├── scripts/
+│   ├── fdata.py              ★★ 统一金融数据 CLI + TCP serve 模式 (12+ 子命令)
+│   ├── ths_trade.py          ★★ 同花顺 Mac AX 自动交易 (高频查询~220ms, switch-account独立)
+│   ├── condition_orders.py   ★ 条件单引擎 (WATCH→ARMED→DONE, 开盘3分钟窗口)
+│   ├── check_window.py / stress_test.py / extreme_fill_test.py  调试/压测脚本
+│   └── hs300_industry_weight.py / example_tick_strategy.py / test_realtime_rate.py
+│
+├── stockview/                旧 Streamlit 行情仪表盘 (保留, 非主流程)
+│   └── app.py / etf_signal.py / fund_flow.py / options.py / ...  20+ 分析模块
+│
+├── nextjs/                   独立实验项目 (资金流向页, 非主系统, 忽略)
+├── tests/                    单测 (test_strategy_system.py 等)
+├── datasource_test/          2026-08-30 数据源选型实测 REPORT.md + 脚本 + 结果
+├── skills/financial-data/    旧 skill 参考 (已被 SKILL.md 取代)
+└── docs/
+    ├── AGENT_HANDOFF.md      本文件 (精简交接版 + 演进脉络)
+    └── quant-framework-report.md   vectorbt/backtrader 调研报告 (参考)
+```
+
+---
+
+## 五、数据层要点（fdata）
+
+**规则：一切行情/K线只走 strategy/fdata_client.py，不许直连 eltdx/akshare。**
+
+```python
+from strategy import fdata_client
+
+# 实时快照: 自动路由所有品种 (股票/ETF/指数→serve; 期货/期权/基金→CLI回退)
+q = fdata_client.quote("601899")   # → {code, name, type, last, pre_close, change_pct, source, ...}
+
+# K线: limit=None → 全历史 (传 --limit 0)
+bars = fdata_client.kline("sz159915", period="5m", kind="stock", adjust="qfq")
+
+# 通用 CLI 透传
+result = fdata_client.cli(["futures", "rb2610", "--tq"])
+```
+
+启动长连接服务器（推荐，快 5-10 倍）：
+```bash
+uv run python trading/fdata.py serve --port 9701
+```
+
+fdata_client 内部：先连 127.0.0.1:9701 → 失败自动回退 subprocess CLI。source 字段标 "eltdx(serve)" / "eltdx(cli)"。
+
+数据源选型（别换，踩过坑的结论）：
+
+| 品类 | 稳定方案 | 别用 |
 |---|---|---|
-| 股票/ETF/指数 快照+K线 | **eltdx**（通达信 7709 协议） | 东财 push2（对本机 IP 限频封禁，efinance/qstock 全挂，efinance 包内还夹带 TickFlow 推广） |
-| 商品/金融期货实时 | akshare 新浪底层（`futures_zh_spot`，~110ms，10/10）或 tqsdk | pytdx/mootdx 扩展行情（7727 端口已死，官方自认失效）；**eltdx 永远不覆盖期货期权** |
-| ETF 期权实时 | 新浪 `hq.sinajs.cn/list=CON_OP_代码1,代码2,...` 批量直连（akshare 未封装批量版） | tqsdk（ETF 期权是付费墙，免费账户被拒） |
-| 商品期权实时 | tqsdk 免费快期账户（用户账号 **soj** 已注册，websocket 批量订阅五档，10/10） | 深度实值合约 last=nan 属正常，按活跃行权价过滤 |
-| 基金净值/快照 | 东财 fund 域名（非 push2，可低频安全用） | |
-| akshare 保留的低频调用 | `option_value_analysis_em`（期权 Greeks/IV）、`stock_info_global_sina`（全球快讯）、`index_stock_cons_weight_csindex`（中证成分权重） | 这三个 TDX 协议覆盖不了，必须留 akshare |
+| 股票/ETF/指数 快照+K线 | **eltdx**（通达信7709，`TdxClient(timeout=5)`） | 东财 push2 / pytdx/mootdx（7727端口已死） |
+| 商品/金融期货实时 | tqsdk（免费账户五档） | eltdx 不覆盖期货 |
+| ETF 期权实时 | 新浪 CON_OP_ 批量直连 | tqsdk（付费墙） |
+| 商品期权实时 | tqsdk | — |
+| 基金净值 | 东财 fund 域名 | — |
+| 全球快讯/中证权重/Greeks | akshare（低频） | — |
 
-### 3.2 eltdx 实用要点（v3.0.9，https://github.com/electkismet/eltdx）
+eltdx 关键要点：指数 K 线 `kind="index"`；分钟线上限 800，用 `limit=0` 全量后本地截断；`timeout=5` 不激进。
 
-- **指数 K 线必须 `kind="index"`**：`client.bars.get("sh000001", period="day", kind="index")`，否则报 `ProtocolError: invalid kline date`。指数 bar 还带 `up_count/down_count`（涨跌家数）。
-- **`all_pages=True` 返回 newest-first**——从 akshare 迁移时必须按时间升序重排，否则信号计算反向。
-- 前复权：`client.bars.get("sz159915", period="day", adjust="qfq")`。
-- 快照是 `QuoteSnapshot` 对象（`last_price/pre_close_price/change_pct/buy_levels/sell_levels/amount`）；K 线是 `KlineSeries`，bar 列表在 `.bars` 里（不能对 series 本身 len()）。
-- 批量：`get_snapshots([codes...])` 一次请求多代码，尽量批量以压低请求数。
-- Client：`with TdxClient(timeout=3) as client:`，自动测速 43 个内置 TDX 主机，保留最快 2 个 × 4 TCP 连接，30s 心跳。实测 10 req/s 持续无 throttling、p50 ~23ms、900+ 请求 100% 成功（用户需求只要 1 req/s）。
-- 数据可回溯数十年（上证指数日K到 1993，8714 根，0.7s）。
-- **分钟线分页上限 800**：limit>800 直接报错——用 `--limit 0` 取全量后本地截断（5m 全历史 ≈2 年/2.4 万根）。盘中取数含当日实时未完成 bar。
-- License 限制：README 仅限个人学习/非商用。
+---
 
-### 3.3 fdata CLI（scripts/fdata.py）★ 查行情一律先走它
+## 六、交易层要点（ths_trade.py + condition_orders.py）
 
-用户与 Agent 已按反馈两轮重构，**stdout 纯 JSON、日志全静音**，封装为 skill `fdata`（`.agents/skills/fdata/SKILL.md`）。
+### ths_trade 子命令（高频 vs 低频彻底分离）
 
-- **首选子命令 `quote CODE`**：按代码形态自动路由，股票/期货/期权返回**同一统一价格结构**（code/type/name/exchange/option/source/volume_unit/quote{last, pre_close, change_pct, open, high, low, 涨跌停, volume, amount, open_interest, pre_settle, bids, asks}），change_pct 统一相对昨收。
-- **期货默认走新浪 `nf_` 直连**（~200ms，支持 IF2612/rb2610 短合约自动解析交易所、郑商所 3 位月份自动扩 4 位）；tqsdk 兜底 / `futures --tq` 强制（有五档但握手 2-4s）。商品/金融期货是两套字段布局。
-- 其余子命令：`snapshot/kline/list`（eltdx）、`futures/copt`（tqsdk）、`etfopt/etfcodes/greeks`（新浪）、`futcontracts/futspot/news/weight`（akshare）、`nav/quote fund`（东财：`quote 004075.of` 最新净值、`nav 004075` 历史净值；货币基金不支持）、`doctor`（10 项数据源自检，退出码 0/1，tqsdk 凭据缺失时 skip 而非 fail）、`watch`（实盘 tick 监控，2026-08-31 加）。每个子命令 `--help` 含用法/示例/返回结构。
-- **分钟K线**：`kline 159915 --period 5m --limit 0`（同上 800 上限规则）。
-- **`watch` 子命令**：常驻进程长连接复用（eltdx / requests.Session / tqsdk websocket），首轮 ~600ms 后每轮 50-100ms。用法 `watch CODE... --interval 1 --strategy xx.py --log s.jsonl`；策略定义 `on_tick(quotes[, feed_errors]) -> list[dict]`，quotes 即 quote 统一结构；新浪源间隔勿 <1s；盘中 last=0 表示无成交且 change_pct=null；示例见 `scripts/example_tick_strategy.py`。**watch 与 strategy/ 的日K目标仓位系统是两个范式**。
-- 实现注意：py_mini_racer shim 必须在 import akshare 之前执行；tqsdk 调用必须包 `_hush()` 静音；CON_OP_/nf_ 字段映射见函数注释。akshare 锁 1.18.37。
-- 证券名称表有 7 天磁盘缓存 `~/.cache/fdata/names.json`（拉取要 3-4s，用户确认一周一刷即可），命中后单次 ~0.5s；删该文件强制刷新。
-- 运行方式：`.venv/bin/python scripts/fdata.py <cmd>` 或 `uv run`。
+```bash
+# ★ 高频查询 (~220ms, 零 flag, 零检查) — 给 /api/positions 等用
+uv run python trading/ths_trade.py positions   # 持仓
+uv run python trading/ths_trade.py orders      # 委托
+uv run python trading/ths_trade.py trades      # 成交
+uv run python trading/ths_trade.py funds       # 资金明细
 
-## 四、同花顺 Mac GUI 自动交易（scripts/ths_trade.py）★ 每条都是实测踩坑
+# ★ 低频切账户 / 登录 (独立子命令, 单独调度, 不影响高频)
+uv run python trading/ths_trade.py switch-account real   # → A股实盘
+uv run python trading/ths_trade.py switch-account sim    # → 模拟练习
+# 功能: 读 .env THS_USER/THS_PASS, 未登录自动登录 → 切 tab → 校验
 
-背景：miniqmt 不可用，改用 GUI 自动化驱动同花顺 Mac 客户端（bundle id `cn.com.10jqka.macstock`）。脚本支持 buy/sell/cancel/positions/orders/trades/funds/login + `--dry-run` + 每步耗时打点，JSON 输出。
+# 下单 (不给 --price 就用联动带出对手价, 不许清空价格框!)
+uv run python trading/ths_trade.py buy 601899 100 --dry-run
+uv run python trading/ths_trade.py sell 601899 100 --price 35.00
 
-- **代码框联动是纯 AX 的**：先 AX set `focused=True` 再 AX set value 就会触发联动（识别市场/带对手价/名称）——完全后台、无需激活窗口、无需键盘事件。直接 set value 不聚焦则不联动，提交报"市场代码不允许为空"。价格/数量直接 AX set value。
-- **联动带出对手价后千万不要清空价格框**——只有显式 `--price` 才覆盖（用户明确要求过）。
-- 键盘/鼠标事件走 osascript System Events（CGEventPostToPid 同花顺不收），必须逐字 keystroke+delay；已降级为 `--keyboard` 备用路径（需前台）。
-- **委托确认框是 attached sheet，不在 AXWindows 枚举里**，要从 `AXFocusedWindow` 拿。读弹窗按窗口面积过滤只扫小窗口（遍历主窗口 1000 元素一轮好几秒）。
-- 实测速度（纯 AX 后台路径）：填单 ~0.5s + 提交确认 ~0.7s ≈ 全流程 ~1.3s。委托成功受理**不弹结果框**（result_text=null），以可用资金冻结判断是否受理（模拟户 20万→196533.89 = 冻结了 34.65×100）。
-- **定位已全部去坐标化**（2026-08-30 窗口被移动后旧坐标全失效，用户明确要求）：输入框用"代码/价格/数量"文字标签锚定（标签右侧同行、中心 y 差<15 的 textfield；工具栏搜索框 y~37 旁无标签天然排除）；功能 tab 用 title+AXEnabled 区分（"持仓"有两个，表头那个是 disabled）；账户名锚定"添加"按钮左侧同行最近的 statictext；表格列头 = 功能 tab 下方区域内带 title 的 enabled 按钮按 y 聚类（±15px）取最大组，右界 = 最右列头+110；行聚类 12px、列映射容差 10px、真数据行首列对齐第一个列头。这些相对布局量可保留。
-- **撤单**：`cancel --contract 编号 | --code 代码 | --all`。唯一入口 = **双击委托行**（行无 AXPress/AXShowMenu），弹"撤单委托"确认框后自动点确认、再自动复核剩余。双击用 System Events 两次 click at（间隔 0.08s），坐标从 AXRow frame 运行时取，**必须激活同花顺前台**。已人工验证真实撤单成功（601899 卖 100@34.64）；脚本自动双击路径结构相同但未跑过真实单。
-- 查询命令：positions/orders/trades/funds，委托/成交/资金明细默认只查"今天"。orders 行解析已在真实委托上验证 ✓。"订单待报"状态 = 非交易时间排队，开盘才报交易所。持仓表坑：账户名限 x<260（否则抓到顶部行情条涨幅）、表格区域限右界（右侧是自选股列表）、真数据行首列需与列头对齐（否则抓到落在表格区域的警告弹窗，弹窗文本单独放 popup 字段返回）。查当前账户 ~1.8s，带切换 ~3-5s。
-- **账户切换**：`--account A股|real|模拟|sim`；切换 = 点左侧 y<100 的 "A股"/"模拟" tab（AXPress），等左侧账户名（x<260, y 90~110，如"王伟"/"模拟练习"）变化。
-- **解释器/依赖**：需 `pyobjc-framework-Cocoa` + `pyobjc-framework-ApplicationServices`（已入 pyproject.toml，带 `sys_platform == 'darwin'` 标记）。**必须 `uv run python scripts/ths_trade.py ...`**（strategy/trader.py 用 sys.executable 调用即项目 venv）；不要再依赖 `~/.mano/venv`（无关环境）。AppKit 能加载 ≠ 能读持仓——若同花顺停在行情页/登录页（交易界面未打开），AX 树里没有 tab，会报"找不到 持仓 tab"，需先打开交易下单界面（这是 GUI 状态问题非代码问题）。
-- **自动登录/断线重连（2026-08-31 已真实闭环验证 ✓）**：凭据在项目根 `.env`（THS_USER/THS_PASS），`load_dotenv()` 启动加载（setdefault 不覆盖已有变量，不打印内容）；所有命令入口默认 `ensure_login`（主窗口出现"立即登录"按钮 = 未登录），`login` 子命令单独触发，`--no-login` 跳过。登录窗字段用"交易帐户/交易密码"标签锚定，密码框 AX set value 可用（无需键盘路径）；成功判定 = 登录窗消失且主窗口无"立即登录"按钮。坑：同花顺退出后用本地保存凭据 1-2 秒内自动重连，想测登录流程必须在退出后零间隔抢按钮（轮询 0.05s）。
-- 模拟账户非交易时间也接受委托并冻结资金；真实国泰海通账户验证过拒单路径（资金不足）。
-- 买入参考价可用 `fdata quote 601899` 取。
-
-## 五、strategy/ 自动化交易系统（2026-08-30 建成）
-
-用户明确要求：策略独立于回测系统、可启停、可并行、接正式下单；**一切下单默认 dry-run 防误操作**。
-
-### 架构
-
-```
-strategy/strategies/*.py   策略：只实现 Strategy.target_position(df, params) -> 0/1 序列 (base.py)
-                           放进去即被 registry 自动发现，零注册
-  ├─ engine.py             回测引擎：收盘出信号、次日开盘成交、佣金万1、整手100份（无未来函数）
-  │    └─ dashboard.py 回测页：多选策略 + 侧栏按 PARAMS schema 动态生成控件实时调参
-  └─ trader.py             实盘执行：信号→固定金额/价格//100*100 份数→ths_trade 下单→state/{name}.state.json 记账
-       ├─ runner.py        每策略独立常驻进程，盘中 9:25-11:30/13:00-15:05 每 poll_seconds(默认60s) 评估一轮，
-       │                   每次取数写 evals.jsonl 流水 + 心跳 + stdout；execute_time(14:55) 当天下单一次
-       ├─ manager.py       start/stop/status CLI（独立进程 + 心跳）
-       └─ run_live.py      cron 入口，默认 dry-run，--execute 才真实下单
-config.json                每策略: enabled/symbols/params/cash_per_symbol/live(dry_run, execute_time, qfq)
-state/                     运行时 pid/心跳/日志/应有仓位记账
+# 撤单 (优先"全撤"按钮方式; 双击行不可靠时自动回退)
+uv run python trading/ths_trade.py cancel --all
 ```
 
-看板：`uv run streamlit run strategy/dashboard.py` 三页——回测 / 实盘策略管理（启停、立即跑一轮、对账）/ 配置（写 config.json）。Streamlit 1.43 的 `st.fragment(run_every=...)` 做自动刷新（实盘页 60s）。
+**AX 核心机制（违反就废单/封接口）**：代码框先 `AXFocused=True` 再填值才触发联动；**绝不激活同花顺窗口到前台**（触发 -25212 封禁，重启客户端恢复）。
 
-### 内置策略
+**下单失败 Bark 通知必发的两种场景**：
+1. 券商结果弹窗含失败词（警告/错误/失败/不足/不允许/拒绝）
+2. 点了确认但等不到对话框（状态未知超时）
+- 从 `.env` 读 `THS_BARK_KEY`；无 key / 网络失败 → 静默跳过，不影响交易主流程
+- 通知内容必须带：方向+代码+数量+价格 + 券商原始返回
 
-| 策略 | 规则 | 标的 |
+### 条件单引擎
+
+编辑 `trading/condition_orders.py` 顶部列表：
+```python
+CONDITION_ORDERS = [{
+    "id": "co_601899_gap",
+    "symbol": "601899",
+    "trigger_gap_pct": -4.0,    # 相对昨收跌4% → 触发买入
+    "buy_qty": 1000,
+    "sell_rally_pct": 1.0,      # 买入价反弹+1% → 卖出
+}]
+```
+
+状态机：
+```
+  WATCH: 盯盘. 仅开盘 09:30 后的前 3 分钟内判定; 最新价/昨收 ≤ trigger_gap_pct
+    → 买入 buy_qty (等待成交确认) → ARMED
+  ARMED: 盯盘. 现价 ≥ 买入价 × (1 + sell_rally_pct)
+    → 卖出 → DONE
+  买入被拒/撤销 → 终止本单 (打印提示)
+```
+
+跨交易日自动重置。行情取 `fdata_client.quote()`，同花顺行情未恢复 → 保持 WATCH 不下单。
+
+运行：
+```bash
+uv run python trading/condition_orders.py --poll 5          # 模拟 (安全)
+uv run python trading/condition_orders.py --live --poll 5   # 真实下单 (ths_trade)
+```
+
+---
+
+## 七、策略系统要点
+
+**策略 = 写 signal() 一次，回测/优化/实盘全复用，禁止 if backtest 分支。**
+
+```python
+# strategy/strategies/my_strategy.py (放进去自动注册)
+from strategy.base import Strategy, INT
+import pandas as pd
+
+class MyStrategy(Strategy):
+    NAME = "my_strategy"
+    TITLE = "我的策略"
+    TIMEFRAME = "day"          # "day"/"5m"/"15m"/...
+    PARAMS = {"window": {"type": INT, "default": 20, "min": 5, "max": 120}}
+    SYMBOLS = ["sz159915"]
+
+    def signal(self, df: pd.DataFrame, params: dict) -> pd.Series:
+        """返回 0/1 目标仓位序列. 写这一次就够了."""
+        ma = df["close"].rolling(int(params["window"])).mean()
+        return (df["close"] > ma).astype(int).where(ma.notna(), 0)
+```
+
+基类默认 `on_bar()` 自动桥接：取历史 → 调 signal → 看最后一根 target → target 变了就 `ctx.submit_order()`。复杂策略（状态机/追踪止损）可自行覆盖 `async def on_bar(bar, ctx)`，但仍要写 signal 供快速回测。
+
+**运行时三层**（runtime/）：
+- **Portfolio**：内存态 + state.json 落盘。两个核心概念严格分离：`target`（策略意图，submit_order 立即更新，防重复下单）vs `qty`（实际持仓，apply_fill 后才更新）
+- **Context**：策略看到的世界。`history()` 取 bars、`qty_for()` 算整手、`submit_order()` 订单意图层（不直接碰 ths_trade）
+- **Broker**：BacktestBroker（submit 入队 pending → 下根 bar.open flush 成交）/ SimulatedBroker（立即 fill）/ LiveBroker（调 ths_trade + 异步 poll 成交流）
+
+**回测口径（vbt_adapter.py）**：entries/exits 布尔序列 `shift(1)` + vbt `price=open` = 收盘出信号 t → 次日开盘 t+1 成交（无未来函数）。佣金万 1（ETF 无印花税）。回测 `/api/backtest` 与 vbt_adapter 用的就是这个口径。
+
+---
+
+## 八、硬约束（任何情况下不得违反，出生产事故的根源）
+
+1. **成交口径统一**：收盘信号 → 次日开盘成交。绝不允许信号当日 close 成交（未来函数）
+2. **策略信号统一 target position 0/1**，不是买卖动作。策略里**禁止 `if backtest/live` 判断**
+3. **所有阻塞调用必须 `asyncio.to_thread()` 包**：eltdx TCP、subprocess、ths_trade AX、文件 IO。漏了就全后端卡住 10-30s + WS 中断
+4. **同花顺交易全程 AX 后台，绝不激活前台**（触发反自动化保护 -25212 封禁 AX）
+5. **高频查询 vs 切账户彻底分离**：positions/orders/trades/funds 无 flag 零检查；切账户/登录用独立 `switch-account` 子命令（单独调度）
+6. **一切取数只走 `strategy/fdata_client.py`**，不许直连 eltdx / subprocess 调 akshare
+7. **fdata kline limit 为空 = 全历史 = 传 `--limit 0`**（eltdx 分钟线上限 800，CLI 默认 limit 30 不够）
+8. **同花顺下单必须显式传价格参数**（避免依赖行情联动带出，联动挂了就下单失败）
+9. **下单失败 Bark 必发**：券商拒单弹窗 + 提交后状态未知超时
+10. **Next.js 根路径 `/` 必须重定向到 `/charts`**，禁止跳转已删除的 `/live`
+11. **前端数字格式化全走 fmt.ts**：股价<10 三位小数、≥10 两位小数；百分比最多两位；金额千分位两位
+12. **React StrictMode 下 ECharts dispose 必须置 ref = null**（StrictMode mount→unmount→mount 双执行导致实例泄漏闪烁）
+13. **Docker 远期架构**：下单 ths_trade 必须在宿主机跑（同花顺 GUI），后端容器走 Webhook → 宿主机轻量 agent，不要把 ths_trade 塞容器
+
+---
+
+## 九、常见坑速查（80% 问题在这里能找到修复方向）
+
+### 前端图表
+
+| 现象 | 原因 | 修复 |
 |---|---|---|
-| ma20_trend | 收盘>MA20 持有，<MA20 空仓（日线） | sz159915 |
-| sma_cross | 快慢线上/下穿（日线） | sh510300 |
-| intraday_t | 日内做T（5m线，TIMEFRAME 属性切换周期）：10:00 后按两市量能预估定方向——放量(>近N日均×1.05 且≥2万亿)先买后卖，缩量/<2万亿先卖后买(需底仓)；买入=恐慌放量杀跌(RSI6≤25 且 5m量≥1.8×均量 且价在VWAP下)，回升 VWAP±0.3% 止盈；冲高≥1.5%后20分钟未创新高+RSI死叉→卖出；14:50 强制了结。实时量能预估复用 stockview/main.py 的 get_estimate_amount | sz159915 |
+| 挂载策略 500 报错 | pandas date 列/索引冲突；numba pyobject；uvicorn --reload 旧代码 | vbt_adapter.py: pop(date)→设index → pd.to_numeric → astype float64；重启 uvicorn |
+| K线买卖 marker 不显示 | bars 数量不足；日期格式不匹配（分钟级/日级双轨） | limit=0 取全历史；KLineChart 双轨日期匹配（精确 + startsWith） |
+| 分时图均价线预先画完整 | 流式测试时 VWAP 计算长度超过 bars 长度 | IntradayChart VWAP 数组与 bars 同步推进，不提前计算末尾 |
+| ECharts 报 "series undefined" | merge 模式传空对象 series | setOption 前过滤 data 为空的 series，确保每个都有 type/name/data |
+| StrictMode 下图闪烁/消失 | dispose 后 ref 未置 null，二次 mount 用旧实例 | chartRef.current?.dispose(); chartRef.current = null; |
+| 分时数据 5 秒才更新 | 用了 REST 轮询 /api/intraday，没走 WebSocket | 确认 ws.ts MarketWs 订阅 /ws/market tick 推送 |
 
-**intraday_t 参数未调优**：2026-03~08 真实回测 -1.9% vs 买入持有 +5.1%（样本期两市持续缩量 ~1.97万亿，压在 2万亿阈值下，策略多处于"先卖后买"持有态）。下一步：在看板侧栏对比 vol_expand/min_amount_yi 后再考虑启用实盘。相关历史研究在 strategy/intraday/（STRATEGY_REPORT.md、analyze_and_backtest.py）和 strategy/t0_intraday/。
+### 后端 API
 
-### MA20 回测基准（sz159915, 2011-12 ~ 2026-08）
+| 现象 | 原因 | 修复 |
+|---|---|---|
+| API 响应 10-30s + WS 中断 | 阻塞调用没包 asyncio.to_thread | 全文搜 subprocess/eltdx/ths_trade 调用，确认被 to_thread 包 |
+| /api/positions 空/报错 | 同花顺未运行/未打开交易界面/未登录 | 手动打开同花顺 → 交易下单界面 → CLI `ths_trade.py positions` 自测 |
+| /api/intraday bars 为空 | 非交易时段没自动回退上一交易日 | fetch_intraday_1m 拉 640 根 1m bars，当日本地分钟数=0 时自动取上一完整交易日 |
+| /ws/mock_stream 连不上 | next.config.ts rewrite 缺 mock_stream 规则；ws.ts URL 没走 rewrite | 检查 next.config.ts 三条 rewrite：/api/backend、/ws/market、/ws/mock_stream |
 
-总收益 +202.2% / 年化 7.8% / 最大回撤 -57.1%（2015-06→2019-01）/ 215 笔 / 胜率 24.7%；买入持有 +332.0%。震荡市（2016 -25%、2018 -22%）连续止损是主要拖累，改进方向：波动率过滤、均线缓冲带、与 etf_signal.py 五因子共振。
+### 数据层
 
-### 关键约定与坑
+| 现象 | 原因 | 修复 |
+|---|---|---|
+| quote 返回 None/空 | fdata serve 未起 + CLI 也不通；同花顺行情连接挂了 | CLI 自测 `fdata.py quote sz159915`；确认同花顺客户端能刷实时价 |
+| eltdx 连接超时/拒连 | 7709 主站不稳；timeout 太短 | TdxClient timeout=5；fdata_client 自动回退 CLI，一般无感 |
+| 分钟 K 线只返回 800 根 | eltdx 分钟线上限 800 | fdata_client.kline limit=None → 内部传 `--limit 0` 全量 |
+| 指数 K 线报 invalid kline date | 缺 kind="index" | kline() 里 kind 正确传 "index" |
 
-- 改回测逻辑动 engine.py，跑 `uv run python -m unittest tests.test_strategy_system` 保真；加策略只写 strategies/*.py；实盘行为调 config.json live 段。
-- state.json 记"应有仓位"，与同花顺实际持仓只**人工对账**不自动纠偏；看板/runner 经项目 venv 调 ths_trade.py（须 `uv run`）。
-- eltdx 分钟线分页上限 800（用 limit 0 全量后本地截断）；plotly 多面板需唯一 key（StreamlitDuplicateElementId）；PARAMS 混有字符串常量（gate/exit_time）时配置页/侧栏需过滤。
-- 159915 无分红不复权=前复权；其他标的请开 qfq（走 fdata）。
+### 交易层
 
-## 六、开源量化框架调研结论（docs/quant-framework-report.md，2026-08-30）
+| 现象 | 原因 | 修复 |
+|---|---|---|
+| 报"市场代码不允许为空" | 代码框没聚焦就填值，不触发联动 | fill_code：先 AXFocused=True → 再填值 → 0.2s 等联动 |
+| AX API 返回 -25212（禁用） | 脚本把同花顺激活到前台，触发反自动化保护 | 全程不许 activate()/前台化；重启同花顺恢复 |
+| 连续下单后代码联动失灵 | 同花顺连续下单导致面板退化，联动停止响应 | 联动失败 → 中止提交（避免废单）；重启同花顺客户端 |
+| 撤单双击不行 → 全撤按钮 | AXRow 双击不可靠 | cancel 优先走"全撤"按钮方式；按钮匹配含"确认/确定/是" |
 
-推荐组合：**vectorbt（参数扫描/批量回测）+ backtrader（事件驱动精写策略）**，数据走现有 fdata，信号输出后接现有 ths_trade 下单。两层回测互验（vbt 快筛参数，backtrader 逐日复现，收益对不上 = 有未来函数）。本地实测：backtrader SMA(10/30) +62.6% vs 买入持有 +111.3%（500根日K 样本）；vectorbt RSI 19 组参数扫描秒级，胜率 80%/PF 2.86（RSI window=6 的 +36.8% 明显过拟合嫌疑，数字仅验证框架可用性）。踩坑：vectorbt 须钉 `plotly<6`；`vbt.settings.array_wrapper["freq"]="d"`；backtrader 必须 addsizer（默认 size=1 股）。未引入：qlib（重，ML 时再看）、vnpy（与 THS 方案重叠）、QUANTAXIS（数据层冲突）、zipline（停更）。**A股口径**：ETF 佣金万1无印花税、T+1、100份整手，框架不默认，需在信号层自约束。落地架构尚未实施。
+---
 
-## 七、已知问题 / 待办 / 下一步
+## 十、当前已知未完成项 / 待办
 
-1. **strategy/、ths_trade.py、fdata.py 新增、docs/、datasource_test/ 等大量文件未提交**——考虑按功能分批 commit。
-2. .env 历史泄露（TUSHARE_TOKEN/IWENCAI_API_KEY 在 git 历史里），仓库若公开需轮换。
-3. intraday_t 参数调优（vol_expand/min_amount_yi 侧栏对比）后再启实盘。
-4. 深市 ETF 期权 CON_OP_ 实时未在盘中验证过。
-5. ths_trade.py cancel 的自动双击路径未跑过真实单（人工验证过同结构手动撤单）。
-6. 回测改进方向：波动率过滤、均线缓冲带、五因子共振。
-7. vectorbt/backtrader 组合落地架构（报告第四节）未实施。
+1. **Docker 生产部署完整闭环**：宿主机 ths_trade agent + 容器 Webhook 下单通道尚未实现（Dockerfile/nginx.conf 已写，但 ths_trade 宿主机 agent 是 TODO）
+2. **intraday_t 策略参数调优**：回测 -1.9% vs 买入持有 +5.1%（两市缩量 ~1.97 万亿环境），vol_expand/min_amount_yi 阈值需重调
+3. **条件单实盘完整闭环验证**：同花顺行情稳定后需跑一次 WATCH→ARMED→DONE 真实下单全流程
+4. **ths_trade cancel 自动双击路径实盘验证**：人工同结构手动撤单成功过，但脚本自动路径未跑真实单
+5. **nextjs/ 独立项目去向确认**：资金流向实验页，是否合并入主 frontend/
+6. **stockview/ 旧 Streamlit 迁移确认**：市场面板/五因子信号/资金流向/行业权重等功能是否全部迁到 Next.js 还是保留双入口
 
-## 八、给下一个 Agent 的操作约定
+---
 
-- 查行情/期货/期权数据：**先走 fdata CLI**（skill `fdata`），不要现调研数据源；不要建议 efinance/qstock/pytdx/mootdx，ETF 期权不要用 tqsdk。
-- 跑任何项目代码用 `uv run`（项目 venv）；tqsdk 凭据在 .env 的 TQ_USER/TQ_PASS，同花顺凭据在 THS_USER/THS_PASS。
-- 所有下单默认 dry-run；真实下单需用户显式确认且同花顺客户端在交易界面。
-- 不要清空联动带出的价格框；不要在脚本里做多余清空操作（用户偏好：输入延迟尽量小）。
-- 新浪源轮询间隔勿 <1s。
-- 用户沟通语言为中文。
+## 十一、给下一个 Agent 的操作约定
+
+- **中文沟通**。用户偏好简洁直接，讨厌多余操作
+- **生产安全 > 一切**：下单类功能默认 dry-run，真实下单需用户反复确认。Bark 通知两个失败场景不能省
+- **不要瞎创新架构**：当前六大子系统结构是多轮迭代踩坑稳定下来的。不要说"我建议换框架重写"
+- **改代码前读 SKILL.md 和文件头注释**：每个核心文件顶部 30 行都是设计决策和踩坑记录，读了就不踩第二次
+- **查行情走 fdata_client，下单走 ths_trade（或 LiveBroker），回测走 vbt_adapter**，不要直连底层绕路径
+- **运行任何项目内 Python 都用 `uv run python xxx`**（项目 venv），不要系统 Python / 其他 venv
+- **diff 尽量小**：尤其高频命令（ths_trade 查询），多加一个 tree scan 就慢 800ms，优化要抠到极致

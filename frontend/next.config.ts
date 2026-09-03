@@ -11,6 +11,10 @@ const nextConfig: NextConfig = {
         source: "/ws/market",
         destination: "http://localhost:8000/ws/market",
       },
+      {
+        source: "/ws/mock_stream",
+        destination: "http://localhost:8000/ws/mock_stream",
+      },
     ];
   },
 };

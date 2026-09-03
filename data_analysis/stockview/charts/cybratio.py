@@ -1,0 +1,96 @@
+import altair as alt
+import pandas as pd
+import streamlit as st
+
+from data_analysis.stockview.tdx_source import fetch_index_daily
+
+SYMBOL_SH = "sh000001"
+SYMBOL_SZ = "sz399001"
+SYMBOL_CYB = "sz399006"
+
+
+# Fetch data for the indices, data format:
+
+#   date	    open	close	high	low	    volume	    amount
+
+@st.cache_data(ttl=180)
+def build_cyb_ratio_dataframe(lookback_days: int = 250) -> pd.DataFrame:
+    df_sh = fetch_index_daily(SYMBOL_SH, count=lookback_days).tail(lookback_days).copy()
+    df_sz = fetch_index_daily(SYMBOL_SZ, count=lookback_days).tail(lookback_days).copy()
+    df_cyb = fetch_index_daily(SYMBOL_CYB, count=lookback_days).tail(lookback_days).copy()
+
+    df_sh["date"] = pd.to_datetime(df_sh["date"]).dt.date
+    df_sz["date"] = pd.to_datetime(df_sz["date"]).dt.date
+    df_cyb["date"] = pd.to_datetime(df_cyb["date"]).dt.date
+
+    df_sh_sz = pd.merge(
+        df_sh[["date", "amount"]],
+        df_sz[["date", "amount"]],
+        on="date",
+        suffixes=("_sh", "_sz"),
+    )
+    df_sh_sz["total_amount"] = df_sh_sz["amount_sh"] + df_sh_sz["amount_sz"]
+
+    df_merged = pd.merge(
+        df_sh_sz,
+        df_cyb[["date", "amount"]].rename(columns={"amount": "cyb_amount"}),
+        on="date",
+    )
+    df_merged["创业板成交占比"] = (df_merged["cyb_amount"] * 100) / df_merged["total_amount"]
+
+    df_result = df_merged[["date", "创业板成交占比"]]
+    df_result = pd.merge(
+        df_result,
+        df_sh[["date", "close"]].rename(columns={"close": "上证指数"}),
+        on="date",
+    )
+    return df_result
+
+
+from data_analysis.stockview.state import init_slider_state, on_slider_change
+
+
+def render_cyb_ratio_page() -> None:
+    st.title("创业板成交占比")
+    st.caption("用创业板成交额占沪深总成交额的比重，观察小盘成长情绪与大盘位置。")
+
+    slider_key = "cyb_ratio_lookback_days"
+    init_val = init_slider_state(slider_key, default_value=250, min_value=60, max_value=500)
+    lookback_days = st.slider(
+        "回看交易日",
+        min_value=60,
+        max_value=500,
+        value=init_val,
+        step=10,
+        key=slider_key,
+        on_change=on_slider_change,
+        args=(slider_key,),
+    )
+    try:
+        df_result = build_cyb_ratio_dataframe(lookback_days)
+    except Exception as exc:
+        st.error(f"创业板成交占比数据获取失败: {exc}")
+        return
+
+    base = alt.Chart(df_result).encode(x="date:T")
+    bars = base.mark_bar(color="steelblue").encode(
+        y=alt.Y("创业板成交占比:Q", scale=alt.Scale(domain=[0, 100])),
+        tooltip=["date:T", "创业板成交占比:Q"],
+    )
+    line = base.mark_line(color="crimson").encode(
+        y=alt.Y("上证指数:Q", scale=alt.Scale(domain=[2000, df_result["上证指数"].max()]))
+    )
+    chart = alt.layer(bars, line).resolve_scale(y="independent")
+
+    latest = df_result.iloc[-1]
+    col1, col2 = st.columns(2)
+    col1.metric("最新创业板成交占比", f"{latest['创业板成交占比']:.2f}%")
+    col2.metric("最新上证指数", f"{latest['上证指数']:.2f}")
+
+    st.altair_chart(chart, use_container_width=True)
+    st.dataframe(df_result.sort_values("date", ascending=False), use_container_width=True)
+
+
+if __name__ == "__main__":
+    st.set_page_config(layout="wide")
+    render_cyb_ratio_page()

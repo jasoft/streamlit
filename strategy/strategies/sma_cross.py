@@ -15,7 +15,7 @@ class SmaCross(Strategy):
     }
     SYMBOLS = ["sh510300"]
 
-    def target_position(self, df: pd.DataFrame, params: dict) -> pd.Series:
+    def signal(self, df: pd.DataFrame, params: dict) -> pd.Series:
         fast = int(min(params["fast"], params["slow"]) )
         slow = int(max(params["fast"], params["slow"]))
         ma_f = df["close"].rolling(fast).mean()

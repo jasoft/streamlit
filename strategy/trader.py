@@ -5,9 +5,9 @@
 """
 from __future__ import annotations
 
-import contextlib
 import datetime as _dt
 import json
+import os
 import subprocess
 import sys
 import time
@@ -17,101 +17,159 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from strategy import config as config_mod  # noqa: E402
+from strategy import fdata_client  # noqa: E402
 from strategy import registry  # noqa: E402
 from strategy.engine import LOT, today_target  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-THS_TRADE = REPO_ROOT / "scripts" / "ths_trade.py"
+THS_TRADE = REPO_ROOT / "trading" / "ths_trade.py"
 STATE_DIR = Path(__file__).resolve().parent / "state"
 
 
-# -------------------------- 进程内 eltdx 直连 --------------------------
-# 每秒刷新场景下 subprocess fdata 开销 (~300-500ms) 不可接受, 直接在进程内用 eltdx.
-
-@contextlib.contextmanager
-def _tdx_inproc():
-    """进程内 eltdx TdxClient 上下文管理器.
-
-    每次调用测速+连接池构建约 50-100ms, 每秒调用一次可接受;
-    避免 subprocess fdata 的 300-500ms Python 启动开销.
-    """
-    from eltdx import TdxClient
-    with TdxClient(timeout=3) as c:
-        yield c
-
-
 def fetch_intraday_1m(symbol: str) -> tuple[pd.DataFrame, float]:
-    """获取当日 1m K 线 + 昨收价 (eltdx 进程内直连).
+    """获取当日 (或最近一个完整交易日) 1m K 线 + 对应昨收价.
+
+    行为:
+      1) 取最近 560 根 1m bars (够装 2 个交易日 480 根 + 余量)
+      2) 若当日 bars ≥ 180 根 → 用当日数据 (盘中/收盘中后段)
+      3) 否则 → 回退到"上一个有 ≥200 根 bars 的完整交易日"(盘后/隔夜场景)
+      4) pre_close 以"目标交易日首根 bar 日期的前一交易日收盘价"为准:
+         - 若仍有前一交易日 bars, 取其最后 close
+         - 否则回退到 snapshot.pre_close_price (足够稳)
 
     Returns:
         (df, pre_close) — df 列 [time, open, high, low, close, volume_lots, amount]
-        仅包含当日数据 (09:30-11:30 + 13:00-15:00), volume 单位手, amount 元.
-        pre_close 为昨收价 (从快照取).
+        volume 单位手, amount 元.
     """
-    with _tdx_inproc() as c:
-        # 1m K 线 — count=280 够装一个交易日 (240 根 + 余量)
-        bars = c.bars.get(symbol, period="1m", kind="stock", count=280)
-        # 快照拿昨收
-        snaps = c.quotes.get_snapshots([symbol])
-        snap = snaps[0]
-        pre_close = snap.pre_close_price
+    if os.environ.get("MOCK_MARKET") == "1":
+        from strategy.mock_market import fetch_intraday_1m_mock
+        return fetch_intraday_1m_mock(symbol)
+    # 统一走 fdata (serve 长连接, 失败回退 CLI), 复用连接减少初始化开销
+    bars = fdata_client.kline(symbol, period="1m", kind="auto", limit=640)
+    snap = fdata_client.quote(symbol)
+    snap_pre_close = float(snap["pre_close"]) if snap and snap.get("pre_close") else 0.0
 
     rows = []
-    for b in bars.bars:
-        t = b.time.replace(tzinfo=None)  # 去时区, 统一 naive
+    for b in bars:
+        t = pd.to_datetime(b["date"]).tz_localize(None)
         rows.append({
             "time": t,
-            "open": b.open, "high": b.high, "low": b.low, "close": b.close,
-            "volume_lots": b.volume_lots, "amount": b.amount,
+            "open": float(b["open"]), "high": float(b["high"]),
+            "low": float(b["low"]), "close": float(b["close"]),
+            "volume_lots": float(b["volume"]), "amount": float(b["amount"]),
         })
-    df = pd.DataFrame(rows)
+    df_all = pd.DataFrame(rows)
+    if df_all.empty:
+        return df_all, snap_pre_close
+    df_all = df_all.sort_values("time").reset_index(drop=True)
 
-    # 仅保留当日
     today = _dt.date.today()
-    df = df[df["time"].dt.date == today].reset_index(drop=True)
-    return df, float(pre_close)
+    by_day = df_all.groupby(df_all["time"].dt.date)
+    # 盘中: 只要今天有 bar 就用今天的 (哪怕只有 1 根, 实时分时逐步填充)
+    # 盘后/隔夜: today 不在 by_day 或当日 bars=0 → 回退到上一完整交易日
+    if today in by_day.groups and len(by_day.get_group(today)) > 0:
+        target_day = today
+    else:
+        # 选上一个有 ≥200 根 bars 的完整交易日
+        days_sorted = sorted(by_day.groups.keys(), reverse=True)
+        target_day = None
+        for d in days_sorted:
+            if d == today:
+                continue
+            if len(by_day.get_group(d)) >= 200:
+                target_day = d
+                break
+        if target_day is None:
+            # 找不到完整日, 退而求其次: 选除今天外 bars 数最多的那天
+            best_day = None
+            best_len = 0
+            for d in days_sorted:
+                if d == today:
+                    continue
+                l = len(by_day.get_group(d))
+                if l > best_len:
+                    best_len = l
+                    best_day = d
+            target_day = best_day if best_day is not None else today
+
+    df = by_day.get_group(target_day).reset_index(drop=True) if target_day in by_day.groups else df_all.iloc[0:0]
+
+    # pre_close: 取目标交易日之前的最后一个交易日最后 1 根 bar 的 close,
+    # 没有则用快照 pre_close 兜底
+    pre_close = snap_pre_close
+    if target_day is not None:
+        # target_day 之前的所有 bars (全部交易日) 中最后一根 close
+        prior = df_all[df_all["time"].dt.date < target_day]
+        if not prior.empty:
+            pre_close = float(prior["close"].iloc[-1])
+    return df, pre_close
 
 
 def fetch_quote_snapshot(symbol: str) -> dict:
-    """获取实时快照 (last_price, pre_close, total_hand, amount, high, low, open)."""
-    with _tdx_inproc() as c:
-        snaps = c.quotes.get_snapshots([symbol])
-        s = snaps[0]
+    """获取实时快照 (last_price, pre_close, total_hand, amount, high, low, open).
+
+    环境变量 MOCK_MARKET=1 时改走模拟数据源 (休市测试用).
+    """
+    if os.environ.get("MOCK_MARKET") == "1":
+        from strategy.mock_market import fetch_quote_snapshot_mock
+        return fetch_quote_snapshot_mock(symbol)
+    q = fdata_client.quote(symbol)
+    if q is None:
+        raise RuntimeError(f"quote 数据缺失: {symbol}")
     return {
-        "last": float(s.last_price),
-        "pre_close": float(s.pre_close_price),
-        "open": float(s.open_price),
-        "high": float(s.high_price),
-        "low": float(s.low_price),
-        "total_hand": float(s.total_hand),
-        "amount": float(s.amount),
-        "change_pct": float(s.change_pct),
+        "name": q.get("name"),
+        "last": q.get("last"),
+        "pre_close": q.get("pre_close"),
+        "open": q.get("open"),
+        "high": q.get("high"),
+        "low": q.get("low"),
+        "total_hand": q.get("volume"),
+        "amount": q.get("amount"),
+        "change_pct": q.get("change_pct"),
     }
 
 
+_NUMERIC_COLS = ["open", "high", "low", "close", "volume", "amount"]
+
+
+def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """统一把 OHLCV/amount 强转为 float64, 无效值 → NaN.
+
+    fdata/eltdx 分钟线返回的字段偶发是 str/None/Decimal 等 object dtype,
+    导致 pandas groupby().cumsum() / .transform() 抛 "cumsum is not supported
+    for object dtype". 在数据出口统一强转, 所有策略/回测链路受益.
+    """
+    for c in _NUMERIC_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
 def _fetch(code: str, qfq: bool, timeframe: str = "day", limit: int | None = None) -> pd.DataFrame:
-    """timeframe: "day" (tdx_source/fdata qfq) 或 "5m"/"30m" 等 (fdata, 不复权)."""
-    if timeframe == "day":
-        if qfq:
-            r = subprocess.run(
-                [sys.executable, str(REPO_ROOT / "scripts" / "fdata.py"),
-                 "kline", code, "--adjust", "qfq", "--limit", "120"],
-                capture_output=True, text=True, timeout=120, check=True)
-            rows = json.loads(r.stdout)["data"]
-            df = pd.DataFrame(rows)
-            df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-            return df[["date", "open", "high", "low", "close", "volume"]]
-        from stockview.tdx_source import fetch_etf_daily
-        return fetch_etf_daily(code)
-    # eltdx 分页上限 800, 大 limit 会报错: 全量拉取后本地截断
-    args = [sys.executable, str(REPO_ROOT / "scripts" / "fdata.py"),
-            "kline", code, "--period", timeframe, "--limit", "0"]
-    r = subprocess.run(args, capture_output=True, text=True, timeout=180, check=True)
-    rows = json.loads(r.stdout)["data"]
+    """timeframe: day/5m/15m/30m/1h/1w (fdata). 1h->60m, 1w->week.
+
+    环境变量 MOCK_MARKET=1 时改走模拟数据源 (休市测试用, 日线最后一根用 mock 实时价).
+    """
+    if os.environ.get("MOCK_MARKET") == "1":
+        from strategy.mock_market import fetch_daily_mock
+        df = fetch_daily_mock(code, limit or 3000)
+        return _coerce_numeric(df)
+    # 周期映射到 fdata 的 period 参数
+    # "分时" 是前端分时图的标识, 回测/K线时按 1m 数据处理
+    tf_map = {"1h": "60m", "1w": "week", "1d": "day", "分时": "1m"}
+    period = tf_map.get(timeframe, timeframe)
+    # 统一走 fdata kline (serve 或 CLI 回退), 全量拉取后本地截断
+    rows = fdata_client.kline(code, period=period, kind="auto",
+                              adjust="qfq" if qfq else None, limit=None)
     if limit is not None:
         rows = rows[-limit:]
+    if not rows:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
     df = pd.DataFrame(rows)
+    if "date" not in df.columns:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
     df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+    df = _coerce_numeric(df)
     return df[["date", "open", "high", "low", "close", "volume"]]
 
 
@@ -121,14 +179,15 @@ def qty_for(cash: float, price: float) -> int:
 
 
 def fetch_intraday(symbol: str, period: str = "5m", limit: int = 80) -> pd.DataFrame:
-    """日内分钟K线 (fdata/eltdx, 盘中含当日实时bar)."""
-    r = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "fdata.py"),
-         "kline", symbol, "--period", period, "--limit", str(limit)],
-        capture_output=True, text=True, timeout=120, check=True)
-    rows = json.loads(r.stdout)["data"]
+    """日内分钟K线 (统一走 fdata, 盘中含当日实时bar)."""
+    rows = fdata_client.kline(symbol, period=period, kind="auto", limit=limit)
+    if not rows:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
     df = pd.DataFrame(rows)
+    if "date" not in df.columns:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
     df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+    df = _coerce_numeric(df)
     return df[["date", "open", "high", "low", "close", "volume"]]
 
 
@@ -145,7 +204,7 @@ def evaluate(name: str, cfg: dict) -> list:
     out = []
     for symbol in cfg["symbols"]:
         df = _fetch(symbol, cfg["live"]["qfq"], tf, limit=3000)
-        target_series = strat.target_position(df, cfg["params"])
+        target_series = strat.signal(df, cfg["params"])
         tgt = int(pd.Series(target_series).fillna(0).astype(int).iloc[-1])
         price = float(df["close"].iloc[-1])
         ma = (round(float(df["close"].rolling(display_w).mean().iloc[-1]), 3)
@@ -204,7 +263,7 @@ def compute_signal(name: str, symbols: list, params: dict, qfq: bool = False) ->
     out = []
     for symbol in symbols:
         df = _fetch(symbol, qfq, tf, limit=3000)
-        target = strat.target_position(df, params)
+        target = strat.signal(df, params)
         sig = today_target(df, target)
         sig["symbol"] = symbol
         out.append(sig)
@@ -241,8 +300,21 @@ def execute(order: dict, dry_run: bool = True, timeout: float = 120.0) -> dict:
     t0 = time.perf_counter()
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        ok = r.returncode == 0
         out, err = r.stdout, r.stderr
+        # 先按退出码判断, 再解析 ths_trade.py 输出的 JSON 中的 ok 字段
+        ok = r.returncode == 0
+        if ok and out.strip():
+            try:
+                data = json.loads(out.strip().splitlines()[-1])
+                ok = bool(data.get("ok", False))
+                # 如果 result_text 含错误信息但 ok 没被 ths_trade.py 识别, 再次兜底
+                rt = str(data.get("result_text", "") or "")
+                if ok and any(kw in rt for kw in
+                              ("警告", "错误", "失败", "关闭", "非交易", "禁止",
+                               "无效", "不足", "超过", "不允许", "拒绝")):
+                    ok = False
+            except (json.JSONDecodeError, IndexError):
+                pass
     except subprocess.TimeoutExpired as e:
         ok, out, err = False, "", f"timeout: {e}"
     return {"ok": ok, "cmd": cmd, "stdout": out[-2000:], "stderr": err[-500:],
@@ -284,3 +356,30 @@ def run_once(name: str, cfg: dict, dry_run: bool | None = None) -> dict:
         summary["executed"].append({**o, "ok": res["ok"],
                                     "msg": (res["stdout"] or res["stderr"])[-300:]})
     return summary
+
+
+async def run_once_via_runner(name: str, cfg: dict, mode: str = "live",
+                              dry_run: bool | None = None) -> dict:
+    """用新 Runner 事件驱动跑一轮 (单标的, 新链路入口).
+
+    流程: Runner.run_live(once=True) -> on_bar -> signal -> submit_order -> broker.
+    与旧 run_once 并存: 旧版供 strategy/runner.py 常驻循环用, 本函数供新前端/新链路.
+
+    mode: backtest/paper/live. dry_run 仅 live 模式生效 (paper 用 SimulatedBroker).
+    """
+    from strategy.runtime.runner import Runner
+    strat = registry.get(name)
+    live = cfg["live"]
+    dry = live["dry_run"] if dry_run is None else dry_run
+    symbols = cfg.get("symbols") or strat.SYMBOLS
+    if not symbols:
+        return {"error": "no symbol"}
+    symbol = symbols[0]
+    runner = Runner(
+        strategy=strat, symbol=symbol, params=cfg["params"],
+        mode=mode, cash=cfg.get("cash_per_symbol", 10000) * 10,
+        cash_per_symbol=cfg.get("cash_per_symbol", 10000),
+        qfq=live.get("qfq", False), dry_run=dry,
+        fetch_fn=_fetch, poll_seconds=int(live.get("poll_seconds", 5)),
+    )
+    return await runner.run_live(once=True)

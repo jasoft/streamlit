@@ -69,16 +69,47 @@ def sleep_until(run_at: dt.datetime, name: str, status: str) -> None:
 
 
 def run_loop(name: str, once: bool = False) -> None:
+    registry.discover()  # 触发策略校验 (首次)
     cfg = config_mod.load().get("strategies", {}).get(name)
     if cfg is None:
         raise SystemExit(f"config.json 中没有策略 {name}")
+    if not cfg.get("enabled", True):
+        # 启动时就禁用, 直接退出 (manager.start 前应已检查, 兜底)
+        heartbeat(name, {"status": "disabled", "msg": "config.enabled=false"})
+        raise SystemExit(f"{name} 在 config 中已禁用")
     live = cfg["live"]
     poll = int(live.get("poll_seconds", 60))
     h, m = map(int, live["execute_time"].split(":"))
     executed_date = None
     skip_session = live.get("skip_session_check", False)
 
+    # 每多少轮重新读一次 config (检查 enabled/参数变更), 避免每次 reload I/O
+    RELOAD_EVERY = 3  # 每 3 轮 (~15s) 检查一次 enabled
+
+    loop_count = 0
     while True:
+        loop_count += 1
+        # 周期性 reload config 检测 enabled=false (前端改 config 后应能自动退出)
+        if loop_count % RELOAD_EVERY == 0:
+            try:
+                latest = config_mod.load().get("strategies", {}).get(name)
+            except Exception as e:
+                latest = None
+                print(f"[{name}] reload config 失败: {e!r}", flush=True)
+            if latest is None:
+                heartbeat(name, {"status": "stopped", "msg": "config 中策略已删除"})
+                print(f"[{name}] config 中已删除策略, 退出", flush=True)
+                break
+            if not latest.get("enabled", True):
+                heartbeat(name, {"status": "stopped", "msg": "config.enabled=false"})
+                print(f"[{name}] enabled 已置 false, 优雅退出", flush=True)
+                break
+            cfg = latest  # 顺便用最新参数覆盖
+            live = cfg["live"]
+            poll = int(live.get("poll_seconds", 60))
+            skip_session = live.get("skip_session_check", False)
+            # 注意: execute_time 不在这里更新 (避免半夜 reload 跳过当天下单)
+
         if once:
             summary = trader.run_once(name, cfg)
             heartbeat(name, {"status": "ran-once", "summary": summary})

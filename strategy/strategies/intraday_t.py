@@ -11,18 +11,42 @@
   先买后卖卖出: 回升到 VWAP±vwap_band 止盈; RSI(6) 死叉 RSI(12) 保护性离场
   先卖后买卖出: 早盘冲高 >= surge 后 20 分钟未创新高, 且 RSI(6) 死叉 RSI(12) -> 卖出
   先卖后买回补: 恐慌杀跌同买入条件, 或价回到 VWAP 下方
-  收盘前 exit_time 强制平仓/回补 (做T当日了结)
+  (已取消开盘/收盘时间限制, 全天任一分钟级 bar 均可交易)
 """
 from __future__ import annotations
 
 import datetime as dt
+import time as _time
+from functools import lru_cache, wraps
 
 import pandas as pd
-import streamlit as st
 
 from strategy.base import Strategy, INT, FLOAT
 
 _WARMUP = 30  # 恐慌放量对比窗口 (bar 数)
+
+
+# ---------- 运行时 TTL 缓存 (替换 @st.cache_data, 不依赖 Streamlit runtime) ----------
+def _ttl_cache(ttl_seconds: int = 300, maxsize: int = 128):
+    """和 @st.cache_data(ttl=300) 等价的运行时 TTL 缓存, 但无 Streamlit 依赖.
+
+    - 纯函数参数必须可哈希 (count:int, 符合)
+    - 首次调用 + ttl 秒内: 命中缓存
+    - 超过 ttl: 重新计算
+    """
+    def deco(fn):
+        fn_inner = lru_cache(maxsize=maxsize)(fn)
+        expire_at = [0.0]
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            now = _time.monotonic()
+            if now > expire_at[0]:
+                fn_inner.cache_clear()
+                expire_at[0] = now + ttl_seconds
+            return fn_inner(*args, **kwargs)
+        wrapper.cache_clear = lambda: (fn_inner.cache_clear(), expire_at.__setitem__(0, 0.0))
+        return wrapper
+    return deco
 
 
 def _rsi(close: pd.Series, period: int) -> pd.Series:
@@ -33,10 +57,10 @@ def _rsi(close: pd.Series, period: int) -> pd.Series:
     return (100 - 100 / (1 + rs)).fillna(50.0)
 
 
-@st.cache_data(ttl=300)
+@_ttl_cache(ttl_seconds=300)
 def _market_day_amounts(count: int = 60) -> pd.Series:
     """沪深两市每日总成交额 (元), 通达信指数日K, 与预估同口径."""
-    from stockview.tdx_source import fetch_index_daily
+    from data_analysis.stockview.tdx_source import fetch_index_daily
     sh = fetch_index_daily("sh000001", count=count)
     sz = fetch_index_daily("sz399001", count=count)
     sh = sh.assign(date=pd.to_datetime(sh["date"]).dt.date).set_index("date")
@@ -46,8 +70,8 @@ def _market_day_amounts(count: int = 60) -> pd.Series:
 
 def _live_estimate() -> float:
     """盘中实时全天成交额预估 (元), 复用项目已有代码."""
-    from stockview.helpers import during_market_time, minutes_since_market_open
-    from stockview.main import get_estimate_amount
+    from data_analysis.stockview.helpers import during_market_time, minutes_since_market_open
+    from data_analysis.stockview.main import get_estimate_amount
     now = dt.datetime.now()
     if not during_market_time(now):
         return 0.0
@@ -71,8 +95,6 @@ class IntradayT(Strategy):
         "vwap_band": {"type": FLOAT, "default": 0.003, "min": 0.0005, "max": 0.02},
         "surge": {"type": FLOAT, "default": 0.015, "min": 0.003, "max": 0.06},
         "stale_min": {"type": INT, "default": 20, "min": 5, "max": 60},
-        "gate": "10:00",
-        "exit_time": "14:50",
     }
 
     # ---- 量能方向判定 ----
@@ -90,11 +112,14 @@ class IntradayT(Strategy):
             return "buy_first"
         return "sell_first"  # 缩量 / 变化不大 / 低于阈值
 
-    def target_position(self, df: pd.DataFrame, params: dict) -> pd.Series:
+    def signal(self, df: pd.DataFrame, params: dict) -> pd.Series:
         p = self.validate_params(params)
+        # 兼容两种契约: date 在列上 (默认) 或 date 已作为 index
+        if "date" not in df.columns:
+            df = df.copy()
+            df["date"] = pd.to_datetime(df.index)
         df = df.sort_values("date").reset_index(drop=True).copy()
         df["date"] = pd.to_datetime(df["date"])
-        shares = df["volume"] * 100  # 手 -> 份
         day = df["date"].dt.date
         # 日内累计 VWAP (向量化, 防 O(n²))
         df["_cum_share"] = df["volume"].groupby(day).cumsum() * 100
@@ -102,8 +127,6 @@ class IntradayT(Strategy):
         vwap_series = df["_cum_amt"] / df["_cum_share"].replace(0, pd.NA)
         rsi_f = _rsi(df["close"], int(p["rsi_fast"]))
         rsi_s = _rsi(df["close"], int(p["rsi_slow"]))
-        gate = dt.time(*map(int, p["gate"].split(":")))
-        exit_t = dt.time(*map(int, p["exit_time"].split(":")))
         stale = dt.timedelta(minutes=int(p["stale_min"]))
         burst_vol = df["volume"].rolling(_WARMUP).mean()
 
@@ -120,7 +143,6 @@ class IntradayT(Strategy):
             sold_px = None
 
             for idx, row in g.iterrows():
-                t = row["date"].time()
                 px = row["close"]
                 if row["high"] > day_high:
                     day_high, day_high_time = row["high"], row["date"]
@@ -128,22 +150,11 @@ class IntradayT(Strategy):
                 if pd.isna(vwap):
                     vwap = px
 
-                if t < gate:
-                    target.iloc[idx] = last
-                    continue
-
                 cross_down = (rsi_f.iloc[idx] < rsi_s.iloc[idx]
                               and rsi_f.iloc[idx - 1] >= rsi_s.iloc[idx - 1])
                 panic = (rsi_f.iloc[idx] <= p["oversold"]
                          and row["volume"] >= p["vol_burst"] * (burst_vol.iloc[idx] or 0)
                          and px <= vwap)
-
-                if t >= exit_t:
-                    # 收盘强制了结: buy_first 平仓, sell_first 回补底仓
-                    pos = 1 if regime == "sell_first" else 0
-                    target.iloc[idx] = pos
-                    last = pos
-                    continue
 
                 if regime == "buy_first":
                     if pos == 0 and panic:
