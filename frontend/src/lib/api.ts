@@ -57,4 +57,28 @@ export const api = {
   chartSessions: () => fetchJSON<{ sessions: any[] }>("/charts/sessions"),
   saveChartSessions: (sessions: any[]) =>
     fetchJSON("/charts/sessions", { method: "PUT", body: JSON.stringify(sessions) }),
+  // --- 条件单 ---
+  conditions: () => fetchJSON<any>("/conditions"),
+  addCondition: (body: any) =>
+    fetchJSON("/conditions", { method: "POST", body: JSON.stringify(body) }),
+  deleteCondition: (id: string) =>
+    fetchJSON(`/conditions/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  startConditionEngine: (body: any) =>
+    fetchJSON("/conditions/engine/start", { method: "POST", body: JSON.stringify(body) }),
+  stopConditionEngine: () =>
+    fetchJSON("/conditions/engine/stop", { method: "POST" }),
+  // --- 网格单 ---
+  grids: () => fetchJSON<any>("/grids"),
+  addGrid: (body: any) =>
+    fetchJSON("/grids", { method: "POST", body: JSON.stringify(body) }),
+  deleteGrid: (id: string) =>
+    fetchJSON(`/grids/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  pauseGrid: (id: string) =>
+    fetchJSON(`/grids/${encodeURIComponent(id)}/pause`, { method: "POST" }),
+  resumeGrid: (id: string) =>
+    fetchJSON(`/grids/${encodeURIComponent(id)}/resume`, { method: "POST" }),
+  startGridEngine: (body: any) =>
+    fetchJSON("/grids/engine/start", { method: "POST", body: JSON.stringify(body) }),
+  stopGridEngine: () =>
+    fetchJSON("/grids/engine/stop", { method: "POST" }),
 };

@@ -12,6 +12,8 @@ export const metadata: Metadata = {
 const nav = [
   { href: "/charts", label: "图会话", icon: "📊" },
   { href: "/backtest", label: "回测", icon: "📈" },
+  { href: "/conditions", label: "条件单", icon: "⚡" },
+  { href: "/grids", label: "网格", icon: "🌐" },
   { href: "/config", label: "配置", icon: "⚙️" },
 ];
 
