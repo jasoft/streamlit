@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# post-checkout hook —— 新建 git worktree 时，自动把主 worktree 里不入库的运行时文件复制过来。
+#
+# 原理：
+#   git worktree add 会以【新 worktree 为 cwd】触发 post-checkout 钩子；
+#   钩子存放在共享的 .git/hooks/（所有 worktree 共用），装一次全局生效。
+#   安装方式：bash scripts/hooks/install.sh （软链到 .git/hooks/post-checkout）
+#
+# 行为：
+#   - 仅当当前位于 linked worktree（非主 worktree）时才动作；
+#     主仓库里的普通 checkout / git clone 直接跳过。
+#   - 目标文件已存在则不覆盖（在已有 worktree 里切分支再次触发时是幂等 no-op）。
+#   - 主 worktree 没有的文件静默跳过。
+#
+# 不复制的（有意为之）：
+#   - market_data.db / backend/charts.db：可再生的缓存库，新 worktree 会自动重建；
+#   - strategy/state/*.json：策略运行态/心跳，复制到多个并行运行的 worktree 有实盘风险。
+#     如确需带走，把对应路径加进 FILES_TO_COPY 即可。
+
+# 需要复制到新 worktree 的本地文件（相对仓库根目录，运行必需但 git 不带）
+FILES_TO_COPY=(
+  ".env"
+  ".env.production"
+  "backend/condition_orders.json"
+  "backend/grid_orders.json"
+)
+
+set -euo pipefail
+
+main_worktree="$(git worktree list --porcelain | sed -n 's/^worktree //p' | head -n 1)"
+current_worktree="$(git rev-parse --show-toplevel)"
+
+# 主仓库内的 checkout / clone：跳过
+[ "$current_worktree" = "$main_worktree" ] && exit 0
+
+copied=0
+for rel in "${FILES_TO_COPY[@]}"; do
+  src="$main_worktree/$rel"
+  dst="$current_worktree/$rel"
+  [ -e "$dst" ] && continue      # 已存在，不覆盖
+  [ -e "$src" ] || continue      # 主仓库也没有，跳过
+  mkdir -p "$(dirname "$dst")"
+  cp -p "$src" "$dst"
+  echo "[worktree-init] copied $rel"
+  copied=$((copied + 1))
+done
+
+if [ "$copied" -gt 0 ]; then
+  echo "[worktree-init] 已从 $main_worktree 复制 $copied 个本地文件"
+  echo "[worktree-init] 提示: 新 worktree 还需运行 'uv sync' 与 'cd frontend && npm ci' 才能启动后端/前端"
+fi
+exit 0

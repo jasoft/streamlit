@@ -29,3 +29,13 @@ stockview/check_names.py
 stockview/debug_*.py
 stockview/test_*.html
 test_playwright.py
+
+# dev.sh worktree 模式的服务日志
+.dev-logs/
+
+# 本地运行时状态 (条件单/网格/自选股配置与状态, CLI 与 Web 共用, 不入库)
+backend/condition_orders.json
+backend/grid_orders.json
+backend/watchlist.json
+.env.worktree
+backend/stockpicker.db
