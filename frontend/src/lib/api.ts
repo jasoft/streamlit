@@ -57,4 +57,19 @@ export const api = {
   chartSessions: () => fetchJSON<{ sessions: any[] }>("/charts/sessions"),
   saveChartSessions: (sessions: any[]) =>
     fetchJSON("/charts/sessions", { method: "PUT", body: JSON.stringify(sessions) }),
+  // --- 选股自动交易 ---
+  pickerStatus: () => fetchJSON<any>("/picker"),
+  pickerStrategies: () => fetchJSON<any[]>("/picker/pickers"),
+  addPickerGroup: (body: any) =>
+    fetchJSON("/picker/groups", { method: "POST", body: JSON.stringify(body) }),
+  updatePickerGroup: (id: string, body: any) =>
+    fetchJSON(`/picker/groups/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deletePickerGroup: (id: string) =>
+    fetchJSON(`/picker/groups/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  runPickerOnce: (id: string) =>
+    fetchJSON(`/picker/groups/${encodeURIComponent(id)}/run-once`, { method: "POST" }),
+  startPickerEngine: (body: any) =>
+    fetchJSON("/picker/engine/start", { method: "POST", body: JSON.stringify(body) }),
+  stopPickerEngine: () =>
+    fetchJSON("/picker/engine/stop", { method: "POST" }),
 };
