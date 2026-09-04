@@ -105,7 +105,7 @@ export default function PortfoliosPage() {
   const [padPct, setPadPct] = useState(0.3);
   const [minOrder, setMinOrder] = useState(1000);
   const [previews, setPreviews] = useState<Record<string, PreviewData>>({});
-  const [results, setResults] = useState<Record<string, ExecResult>>({});
+  const [results, setResults] = useState<Record<string, ExecResult | undefined>>({});
   const [adjustRows, setAdjustRows] = useState<Record<string,
     { code: string; name: string; weight: string }[]>>({});
 

@@ -96,13 +96,13 @@ export const api = {
     fetchJSON<any>(`/portfolios/${encodeURIComponent(id)}/preview` +
       `?action=${action}&amount=${amount}&min_order_value=${minOrderValue}`),
   portfolioBuy: (id: string, body: any) =>
-    fetchJSON(`/portfolios/${encodeURIComponent(id)}/buy`,
+    fetchJSON<any>(`/portfolios/${encodeURIComponent(id)}/buy`,
       { method: "POST", body: JSON.stringify(body) }),
   portfolioSell: (id: string, body: any) =>
-    fetchJSON(`/portfolios/${encodeURIComponent(id)}/sell`,
+    fetchJSON<any>(`/portfolios/${encodeURIComponent(id)}/sell`,
       { method: "POST", body: JSON.stringify(body) }),
   portfolioSync: (id: string, body: any) =>
-    fetchJSON(`/portfolios/${encodeURIComponent(id)}/sync`,
+    fetchJSON<any>(`/portfolios/${encodeURIComponent(id)}/sync`,
       { method: "POST", body: JSON.stringify(body) }),
   // --- 自选股 ---
   watchlist: () => fetchJSON<any>("/watchlist"),
