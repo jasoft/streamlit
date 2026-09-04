@@ -32,6 +32,8 @@ POSITIONS_TIMEOUT = 30            # ths_trade positions 子进程超时 (秒)
 MAX_REMOVED = 200                 # tombstone 上限, 防止无限增长
 
 _CODE_RE = re.compile(r"^\d{6}$")
+# 持仓数量字段: 同花顺不同版本列名不同 (老版"持仓数量", 新版"实际数量"/"股票余额")
+_QTY_FIELDS = ("持仓数量", "实际数量", "股票余额")
 
 # 6 位纯数字 -> 交易所前缀. 两位前缀先判 (转债/ETF/北交所), 再判一位前缀.
 _PREFIX_2 = {
@@ -51,29 +53,40 @@ _bg_task: Optional[asyncio.Task] = None
 def normalize_symbol(raw: str) -> tuple[str, str, str]:
     """归一化标的输入 -> (symbol, code, market).
 
-    支持: "601899" / "sh601899" / "SZ159915" / " bj830799 ".
-    期货/期权等非 6 位数字代码原样接受 (symbol=去除空白后小写, code="").
+    支持: "601899" / "sh601899" / "SZ159915" / " bj830799 " / "00700" /
+    "700.hk" / "hk700" (港股通 5 位代码, 不足 5 位左侧补零) .
+    期货/期权等非数字代码原样接受 (symbol=去除空白后小写, code="").
     无法判定交易所的 6 位代码 symbol=code, market="" (fdata 会自行尝试).
     """
     s = str(raw).strip().lower()
     if not s:
         raise ValueError("标的代码不能为空")
-    bare = s[-6:] if len(s) == 8 and s[:2] in ("sh", "sz", "bj") else s
-    if len(s) == 8 and s[:2] in ("sh", "sz", "bj") and _CODE_RE.match(bare):
-        return s, bare, s[:2]
-    if _CODE_RE.match(s):
-        market = ""
-        for mkt, pre in _PREFIX_2.items():
-            if s.startswith(pre):
-                market = mkt
-                break
-        if not market:
-            for mkt, pre in _PREFIX_1.items():
+    if s.endswith(".hk"):
+        s = s[:-3]
+    # 显式市场前缀: hk00700 -> 港股; sh601899 / sz159915 / bj830799 -> A股
+    if s.startswith("hk") and s[2:].isdigit() and 1 <= len(s) - 2 <= 5:
+        code = s[2:].zfill(5)
+        return "hk" + code, code, "hk"
+    if s[:2] in ("sh", "sz", "bj") and _CODE_RE.match(s[2:]):
+        return s, s[2:], s[:2]
+    if s.isdigit():
+        if len(s) <= 5:
+            # 港股通: 同花顺显示 5 位代码 (00700), 短代码左侧补零
+            code = s.zfill(5)
+            return "hk" + code, code, "hk"
+        if len(s) == 6:
+            market = ""
+            for mkt, pre in _PREFIX_2.items():
                 if s.startswith(pre):
                     market = mkt
                     break
-        return (market + s) if market else s, s, market
-    # 非 A 股 6 位代码 (期货/期权等): 原样接受, 交给下游数据源自查
+            if not market:
+                for mkt, pre in _PREFIX_1.items():
+                    if s.startswith(pre):
+                        market = mkt
+                        break
+            return (market + s) if market else s, s, market
+    # 非 A 股/港股数字代码 (期货/期权等): 原样接受, 交给下游数据源自查
     return s, "", ""
 
 
@@ -183,16 +196,30 @@ def _parse_qty(v) -> int:
 
 
 def _positions_from_rows(rows) -> list[dict]:
-    """过滤 ths positions rows -> [{code, name}]. 无效行 (代码非 6 位/0 持仓) 跳过."""
+    """过滤 ths positions rows -> [{code, name}].
+
+    接受 A股 6 位代码与港股通 5 位代码 (00700, 可能带 .HK 后缀);
+    资金行 (证券代码非数字) 与清仓残留 0 持仓行跳过.
+    """
     out = []
     for row in rows:
         if not isinstance(row, dict):
             continue
-        code = str(row.get("证券代码", "")).strip()
-        if not _CODE_RE.match(code):
+        code = str(row.get("证券代码", "")).strip().lower()
+        if code.endswith(".hk"):
+            code = code[:-3]
+        if not code.isdigit():
             continue
-        qty = _parse_qty(row.get("持仓数量", 0))
-        if "持仓数量" in row and qty <= 0:
+        if len(code) <= 5:
+            code = code.zfill(5)     # 港股通短码补零 (0700.HK -> 00700)
+        elif len(code) != 6:
+            continue
+        qty = None
+        for f in _QTY_FIELDS:
+            if f in row:
+                qty = _parse_qty(row[f])
+                break
+        if qty is not None and qty <= 0:
             continue  # 清仓后残留的 0 持仓行不入自选
         out.append({"code": code, "name": str(row.get("证券名称", "")).strip()})
     return out

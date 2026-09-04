@@ -31,11 +31,28 @@ class TestNormalizeSymbol(unittest.TestCase):
             self.assertEqual(code, raw, raw)
             self.assertEqual(market, want[:2], raw)
 
+    def test_hk_codes(self):
+        # 港股通: 5 位代码 (同花顺口径), 短代码补零, 支持 hk 前缀 / .HK 后缀
+        cases = {
+            "00700": ("hk00700", "00700"),
+            "09992": ("hk09992", "09992"),
+            "700": ("hk00700", "00700"),
+            "700.hk": ("hk00700", "00700"),
+            "hk700": ("hk00700", "00700"),
+            "HK09992": ("hk09992", "09992"),
+        }
+        for raw, (want_sym, want_code) in cases.items():
+            sym, code, market = watchlist.normalize_symbol(raw)
+            self.assertEqual((sym, code), (want_sym, want_code), raw)
+            self.assertEqual(market, "hk", raw)
+
     def test_prefixed_and_case(self):
         self.assertEqual(watchlist.normalize_symbol("SH601899"),
                          ("sh601899", "601899", "sh"))
         self.assertEqual(watchlist.normalize_symbol(" sz159915 "),
                          ("sz159915", "159915", "sz"))
+        self.assertEqual(watchlist.normalize_symbol("bj830799"),
+                         ("bj830799", "830799", "bj"))
         # 指数必须显式带前缀, 原样保留
         self.assertEqual(watchlist.normalize_symbol("sh000001"),
                          ("sh000001", "000001", "sh"))
@@ -122,14 +139,48 @@ class TestCrudAndTombstone(unittest.TestCase):
 
 
 class TestPositionsParsing(unittest.TestCase):
-    def test_rows_filtered(self):
+    def setUp(self):
+        # sync 用例会写状态文件, 必须隔离到 tmp, 避免与运行中的后端互相污染
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self.tmp.close()
+        Path(self.tmp.name).unlink()
+        self._patcher = patch.object(watchlist, "WATCHLIST_FILE",
+                                     Path(self.tmp.name))
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def test_rows_filtered_new_ths_columns(self):
+        # 2026-09 实测同花顺列: 实际数量/股票余额 (无"持仓数量"), 交易市场含沪HK
         rows = [
-            {"证券代码": "601899", "证券名称": "紫金矿业", "持仓数量": "1,200"},
-            {"证券代码": "159915", "证券名称": "创业板ETF", "持仓数量": 0},   # 0 持仓跳过
-            {"证券代码": "", "证券名称": "人民币"},                            # 资金行跳过
+            {"证券代码": "513120", "证券名称": "HK创新药", "实际数量": "149,400",
+             "交易市场": "上海A股"},
+            {"证券代码": "600988", "证券名称": "赤峰黄金", "实际数量": 21000,
+             "交易市场": "上海A股"},
+            {"证券代码": "00700", "证券名称": "腾讯控股", "实际数量": 400,
+             "交易市场": "沪HK"},
+            {"证券代码": "03441", "证券名称": "南方东西精选", "股票余额": 122000,
+             "交易市场": "沪HK"},
+            {"证券代码": "09992", "证券名称": "泡泡玛特", "实际数量": 0,
+             "交易市场": "沪HK"},      # 0 持仓跳过
+            {"证券代码": "0700.HK", "证券名称": "带后缀", "实际数量": 100},
+            {"证券代码": "", "证券名称": "人民币"},                # 资金行跳过
             {"证券名称": "无代码行"},
             "not-a-dict",
         ]
+        out = watchlist._positions_from_rows(rows)
+        self.assertEqual(out, [
+            {"code": "513120", "name": "HK创新药"},
+            {"code": "600988", "name": "赤峰黄金"},
+            {"code": "00700", "name": "腾讯控股"},
+            {"code": "03441", "name": "南方东西精选"},
+            {"code": "00700", "name": "带后缀"},   # 0700.HK -> 补零
+        ])
+
+    def test_rows_filtered_old_columns(self):
+        rows = [{"证券代码": "601899", "证券名称": "紫金矿业", "持仓数量": "1,200"}]
         out = watchlist._positions_from_rows(rows)
         self.assertEqual(out, [{"code": "601899", "name": "紫金矿业"}])
 
@@ -137,6 +188,17 @@ class TestPositionsParsing(unittest.TestCase):
         out = watchlist._positions_from_rows(
             [{"证券代码": "510300", "证券名称": "沪深300ETF"}])
         self.assertEqual(len(out), 1)
+
+    def test_sync_adds_hk_stocks(self):
+        with patch.object(watchlist, "_run_ths_positions",
+                          return_value=[{"code": "00700", "name": "腾讯控股"}]):
+            r = watchlist.sync_positions()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["added"], ["hk00700"])
+        stocks = watchlist.get_status()["stocks"]
+        self.assertEqual(stocks[0]["symbol"], "hk00700")
+        self.assertEqual(stocks[0]["code"], "00700")
+        self.assertEqual(stocks[0]["name"], "腾讯控股")
 
 
 if __name__ == "__main__":
