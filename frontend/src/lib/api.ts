@@ -81,4 +81,27 @@ export const api = {
     fetchJSON("/grids/engine/start", { method: "POST", body: JSON.stringify(body) }),
   stopGridEngine: () =>
     fetchJSON("/grids/engine/stop", { method: "POST" }),
+  // --- 组合交易 (人工ETF) ---
+  portfolios: (withPositions = true) =>
+    fetchJSON<any>(`/portfolios?with_positions=${withPositions ? 1 : 0}`),
+  createPortfolio: (body: any) =>
+    fetchJSON("/portfolios", { method: "POST", body: JSON.stringify(body) }),
+  updatePortfolio: (id: string, body: any) =>
+    fetchJSON(`/portfolios/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(body) }),
+  deletePortfolio: (id: string) =>
+    fetchJSON(`/portfolios/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  portfolioPreview: (id: string, action: "buy" | "sell" | "sync",
+                     amount = 0, minOrderValue = 1000) =>
+    fetchJSON<any>(`/portfolios/${encodeURIComponent(id)}/preview` +
+      `?action=${action}&amount=${amount}&min_order_value=${minOrderValue}`),
+  portfolioBuy: (id: string, body: any) =>
+    fetchJSON(`/portfolios/${encodeURIComponent(id)}/buy`,
+      { method: "POST", body: JSON.stringify(body) }),
+  portfolioSell: (id: string, body: any) =>
+    fetchJSON(`/portfolios/${encodeURIComponent(id)}/sell`,
+      { method: "POST", body: JSON.stringify(body) }),
+  portfolioSync: (id: string, body: any) =>
+    fetchJSON(`/portfolios/${encodeURIComponent(id)}/sync`,
+      { method: "POST", body: JSON.stringify(body) }),
 };

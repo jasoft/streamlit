@@ -26,6 +26,14 @@ API 设计:
     POST /api/grids/{id}/resume          恢复单个网格
     POST /api/grids/engine/start         启动网格引擎 {live, cash, poll_seconds}
     POST /api/grids/engine/stop          停止网格引擎
+    GET  /api/portfolios                 组合列表 + 实时价 + 同花顺真实持仓对照
+    POST /api/portfolios                 创建组合 {name, items:[{code, weight}]}
+    PUT  /api/portfolios/{pid}           组合调整 (增减个股/改权重)
+    DELETE /api/portfolios/{pid}         删除组合
+    GET  /api/portfolios/{pid}/preview   分配/调仓预览 ?action=buy|sell|sync&amount=
+    POST /api/portfolios/{pid}/buy       按权重买入一篮子 {total_amount, dry_run}
+    POST /api/portfolios/{pid}/sell      按权重卖出一篮子 {total_amount, dry_run}
+    POST /api/portfolios/{pid}/sync      同步仓位 (人工ETF调仓) {dry_run, min_order_value}
     GET  /api/positions                  同花顺实际持仓 (subprocess ths_trade)
     GET  /api/quote/{symbol}             实时快照
   WebSocket:
@@ -708,6 +716,110 @@ async def start_grid_engine(req: GridEngineReq):
 @app.post("/api/grids/engine/stop")
 async def stop_grid_engine():
     return await grid_mgr.stop()
+
+
+# --- 组合交易 (trading/portfolios.py 人工ETF: 按权重买卖篮子 + 同步真实仓位) ---
+from backend import portfolios as pf_mgr  # noqa: E402
+
+
+class PortfolioCreateReq(BaseModel):
+    name: str
+    note: str = ""
+    items: list[dict]              # [{code, weight, name?}] weight 为百分比 (自动归一到 100)
+
+
+class PortfolioUpdateReq(BaseModel):
+    name: str | None = None
+    note: str | None = None
+    items: list[dict] | None = None   # 传则整体替换组合标的 (组合调整)
+
+
+class PortfolioTradeReq(BaseModel):
+    total_amount: float              # buy: 买入总金额 / sell: 卖出总金额
+    dry_run: bool = True             # true=纯试算不碰同花顺; false=真实委托
+    pad_pct: float = 0.3             # 限价浮动 % (买加价/卖降价保成交)
+
+
+class PortfolioSyncReq(BaseModel):
+    dry_run: bool = True
+    pad_pct: float = 0.3
+    min_order_value: float = 1000.0  # 差额低于该值不下单 (零股清尾除外)
+
+
+@app.get("/api/portfolios")
+async def get_portfolios(with_positions: bool = True):
+    """组合列表 + 实时价 + 同花顺真实持仓对照. with_positions=false 跳过持仓读取."""
+    return await pf_mgr.overview(with_positions)
+
+
+@app.post("/api/portfolios")
+async def create_portfolio(req: PortfolioCreateReq):
+    """创建组合 (权重自动归一到 100, 标的名称自动按行情补全)."""
+    try:
+        pf = await pf_mgr.create(req.name, req.items, req.note)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "portfolio": pf}
+
+
+@app.put("/api/portfolios/{pid}")
+async def update_portfolio(pid: str, req: PortfolioUpdateReq):
+    """组合调整: 增减个股 / 改权重 / 改名. 只改配比, 不动真实持仓."""
+    try:
+        pf = await pf_mgr.update(pid, items=req.items, name=req.name, note=req.note)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "portfolio": pf}
+
+
+@app.delete("/api/portfolios/{pid}")
+async def delete_portfolio(pid: str):
+    if not pf_mgr.delete(pid):
+        return JSONResponse(status_code=404, content={"detail": f"组合 {pid} 不存在"})
+    return {"ok": True}
+
+
+@app.get("/api/portfolios/{pid}/preview")
+async def preview_portfolio(pid: str, action: str = "buy", amount: float = 0.0,
+                            min_order_value: float = 1000.0):
+    """分配/调仓预览 (不下单): action=buy|sell (按 amount 分配) 或 sync (按权重对齐持仓)."""
+    try:
+        return await pf_mgr.preview(pid, action, amount,
+                                    min_order_value=min_order_value)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+
+
+@app.post("/api/portfolios/{pid}/buy")
+async def buy_portfolio(pid: str, req: PortfolioTradeReq):
+    """按权重买入一篮子 (total_amount 分配到各标的). dry_run=false 真实下单!"""
+    try:
+        return await pf_mgr.execute(pid, "buy", req.total_amount,
+                                    pad_pct=req.pad_pct, dry_run=req.dry_run)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+
+
+@app.post("/api/portfolios/{pid}/sell")
+async def sell_portfolio(pid: str, req: PortfolioTradeReq):
+    """按权重卖出一篮子 (卖出 total_amount, 各标的按权重分摊). dry_run=false 真实下单!"""
+    try:
+        return await pf_mgr.execute(pid, "sell", req.total_amount,
+                                    pad_pct=req.pad_pct, dry_run=req.dry_run)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+
+
+@app.post("/api/portfolios/{pid}/sync")
+async def sync_portfolio(pid: str, req: PortfolioSyncReq):
+    """同步仓位 (人工ETF调仓): 真实持仓按新配比对齐, 生成差额订单 (先卖后买)."""
+    try:
+        return await pf_mgr.execute(pid, "sync",
+                                    pad_pct=req.pad_pct,
+                                    min_order_value=req.min_order_value,
+                                    dry_run=req.dry_run)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
 
 
 # --- 启停 / 执行 ---
