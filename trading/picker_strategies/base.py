@@ -50,6 +50,16 @@ class PickStrategy(ABC):
 
     # ------------------------------------------------------ 共用指标工具 ----
     @staticmethod
+    def p(params: dict, key: str, default):
+        """参数取值: 仅 None/缺失 回退 default.
+
+        不能写 `params.get(k) or default` — 0/False 是合法覆盖值 (如 vol_ratio=0
+        表示不设量比门槛), 会被 or 吞掉回退默认值。
+        """
+        v = params.get(key)
+        return default if v is None else v
+
+    @staticmethod
     def closes(bars: list[dict]) -> list[float]:
         return [float(b.get("close") or 0) for b in bars]
 

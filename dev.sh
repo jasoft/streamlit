@@ -2,15 +2,28 @@
 # 本地开发启动脚本：一键清理孤儿进程 + 启动 fdata(:9701) + FastAPI(:8000) + Next.js(:3001)
 # 用法: ./dev.sh   |   停止: Ctrl-C
 # 可选: NO_FDATA=1 ./dev.sh   跳过启动 fdata（仍会清理端口）
+# 多 worktree 隔离: 存在 .env.worktree 时加载其中的 BACKEND_PORT/FRONTEND_PORT/FDATA_PORT,
+# 且 fdata 若已在监听则直接复用不重启 (清理/退出都不会杀共享 fdata), 清理动作按端口收窄,
+# 不会误杀其他 worktree 的后端/前端。
 set -e
 cd "$(dirname "$0")"   # 切到项目根目录，保证路径正确
+
+# worktree 本地端口覆盖 (gitignore, 不入库); 存在则优先生效
+if [ -f .env.worktree ]; then
+  # shellcheck disable=SC1091
+  set -a; source .env.worktree; set +a
+fi
 
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3001}"
 FDATA_PORT="${FDATA_PORT:-9701}"
+export BACKEND_PORT FRONTEND_PORT FDATA_PORT   # next.config.ts 读 BACKEND_PORT 配 rewrite
 FDATA_PID=""
+FDATA_OWNED=0
 UVICORN_PID=""
 _CLEANUP_DONE=0
+
+fdata_alive() { nc -z 127.0.0.1 "$FDATA_PORT" >/dev/null 2>&1; }
 
 # --------------------------
 # 端口清理：精准 lsof → PID → kill（TERM 优先，残留再 KILL）
@@ -55,10 +68,12 @@ cleanup() {
   # 收尾再清理一次端口和孤儿进程，防止还有残留
   kill_port "$BACKEND_PORT"
   kill_port "$FRONTEND_PORT"
-  if [ -z "$NO_FDATA" ]; then
+  # 只回收自己启动的 fdata; 复用的共享 fdata (其他 worktree/主栈在用) 不动
+  if [ "$FDATA_OWNED" = "1" ]; then
     kill_port "$FDATA_PORT"
   fi
-  pkill -f "uvicorn backend.main:app" 2>/dev/null || true
+  # 按端口精确匹配, 只清自己的 uvicorn (不误杀其他 worktree 的 backend.main:app)
+  pkill -f "uvicorn backend.main:app.*--port ${BACKEND_PORT}" 2>/dev/null || true
   exit 0
 }
 trap cleanup INT TERM EXIT
@@ -68,23 +83,33 @@ trap cleanup INT TERM EXIT
 # ================
 echo "=============================================="
 echo ">>> [前置清理] 释放端口 $FDATA_PORT (fdata) / $BACKEND_PORT (后端) / $FRONTEND_PORT (前端)"
-kill_port "$FDATA_PORT"
+# 共享 fdata 已在监听 -> 复用, 不清理; 否则清掉残留再启动自己的
+if fdata_alive; then
+  echo ">>> fdata 已在端口 $FDATA_PORT 运行, 直接复用 (不重启)"
+else
+  kill_port "$FDATA_PORT"
+fi
 kill_port "$BACKEND_PORT"
 kill_port "$FRONTEND_PORT"
-# 彻底清理可能残留的孤儿 worker (不监听端口的 multiprocessing.spawn 子进程)
-pkill -f "uvicorn backend.main:app" 2>/dev/null || true
+# 彻底清理可能残留的孤儿 worker (按端口匹配, 不影响其他 worktree)
+pkill -f "uvicorn backend.main:app.*--port ${BACKEND_PORT}" 2>/dev/null || true
 echo ">>> [前置清理] 完成"
 echo "=============================================="
 
 # ================
-# 1) fdata 数据网关（默认启动，NO_FDATA=1 时跳过）
+# 1) fdata 数据网关（默认启动; 已有共享实例则复用; NO_FDATA=1 时跳过）
 # ================
 if [ -z "$NO_FDATA" ]; then
-  echo ">>> 启动 fdata 数据网关 (端口 $FDATA_PORT)"
-  uv run python trading/fdata.py serve --port "$FDATA_PORT" &
-  FDATA_PID=$!
-  # 给 fdata 一点时间启动，避免后端刚起来时立刻回退到 CLI
-  sleep 1
+  if fdata_alive; then
+    echo ">>> 复用已有 fdata 数据网关 (端口 $FDATA_PORT)"
+  else
+    echo ">>> 启动 fdata 数据网关 (端口 $FDATA_PORT)"
+    uv run python trading/fdata.py serve --port "$FDATA_PORT" &
+    FDATA_PID=$!
+    FDATA_OWNED=1
+    # 给 fdata 一点时间启动，避免后端刚起来时立刻回退到 CLI
+    sleep 1
+  fi
 fi
 
 # ================

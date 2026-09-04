@@ -34,11 +34,11 @@ class VolumeBreakoutPicker(PickStrategy):
     }
 
     async def select(self, universe: list[str], params: dict) -> list[PickCandidate]:
-        limit = int(params.get("kline_limit") or 60)
-        n_break = int(params.get("breakout_days") or 20)
-        vol_ratio = float(params.get("vol_ratio") or 1.8)
-        vol_days = max(int(params.get("vol_days") or 5), 1)
-        max_gain = float(params.get("max_gain_pct") or 7.0)
+        limit = int(self.p(params, "kline_limit", 60))
+        n_break = int(self.p(params, "breakout_days", 20))
+        vol_ratio = float(self.p(params, "vol_ratio", 1.8))
+        vol_days = max(int(self.p(params, "vol_days", 5)), 1)
+        max_gain = float(self.p(params, "max_gain_pct", 7.0))
         out: list[PickCandidate] = []
         for code in universe:                       # 串行拉取: serve 长连接复用
             try:
@@ -63,8 +63,9 @@ class VolumeBreakoutPicker(PickStrategy):
             pre_close = float(bars[-2].get("close") or 0)
             day_gain = self.pct(px, pre_close)
             if px > prev_high and vr >= vol_ratio and day_gain <= max_gain:
+                # 名称不在日K数据里, 由引擎用实时快照补全, 这里只给空串占位
                 out.append(PickCandidate(
-                    code=code, name=str(last.get("name") or code), price=px,
+                    code=code, name=str(last.get("name") or ""), price=px,
                     reason=(f"突破{prev_high:.2f} 放量{vr:.2f}倍 "
                             f"涨幅{day_gain:.2f}%≤{max_gain:g}%"),
                     score=vr))                      # 放量越显著越优先
@@ -80,13 +81,13 @@ class VolumeBreakoutPicker(PickStrategy):
             return ""
         buy_px = float(pos.get("buy_price") or 0)
         pnl = self.pct(last, buy_px)
-        tp = float(params.get("take_profit_pct") or 15.0)
-        sl = float(params.get("stop_loss_pct") or -4.0)
+        tp = float(self.p(params, "take_profit_pct", 15.0))
+        sl = float(self.p(params, "stop_loss_pct", -4.0))
         if buy_px > 0 and pnl <= sl:
             return f"止损 {pnl:.2f}% ≤ {sl:g}%"
         if buy_px > 0 and pnl >= tp:
             return f"止盈 {pnl:.2f}% ≥ {tp:g}%"
-        n_low = int(params.get("breakdown_days") or 5)
+        n_low = int(self.p(params, "breakdown_days", 5))
         if len(bars) >= n_low + 1:
             lows = [float(b.get("close") or 0) for b in bars[-n_low - 1:-1]]
             prev_low = min(v for v in lows if v > 0) if any(v > 0 for v in lows) else 0

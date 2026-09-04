@@ -116,10 +116,13 @@ class StockPickerEngine:
         self.brokers: dict[str, Broker] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._started = False            # start_all 后为 True; 未启动时 add/update 不建协程
+        self._group_locks: dict[str, asyncio.Lock] = {}
         # gid -> [{code,name,qty,price,reason,order_id}] 实盘买入已提交未回报
         self._pending_buys: dict[str, list[dict]] = {}
         self._quotes: dict[str, dict[str, float]] = {}          # gid -> {code: last}
         self._bars_cache: dict[str, tuple[float, list[dict]]] = {}  # code:limit -> (ts, bars)
+        # gid -> {code}: 本轮已卖出/在卖的标的, 同轮买入扫描跳过 (防卖出后立即回购换手)
+        self._sold_this_round: dict[str, set[str]] = {}
         for cfg in groups_cfg:
             self._register_group(PickerGroup.from_cfg(cfg))
 
@@ -139,17 +142,18 @@ class StockPickerEngine:
 
     # ------------------------------------------------------- 组生命周期 ----
     def _register_group(self, g: PickerGroup) -> None:
-        """登记组: 独立 Portfolio + Broker (组间隔离的关键). 插件缺失则标记错误."""
+        """登记组: 独立 Portfolio + Broker (组间隔离的关键). 插件缺失只标记错误,
+        不阻断登记 (资金/持仓照常可见, 补上插件 update 后即可恢复扫描)."""
         self.groups[g.strategy_id] = g
-        if g.picker not in self.pickers:
-            g.last_error = f"选股插件不存在: {g.picker} (可选: {list(self.pickers)})"
-            self._log(g.strategy_id, g.last_error)
-            return
         # load: 复用 strategy/state/stockpicker_<id>.state.json, 重启恢复资金/持仓
         pf = Portfolio.load(f"stockpicker_{g.strategy_id}", self.cash)
         self.pfs[g.strategy_id] = pf
         self.brokers[g.strategy_id] = LiveBroker(pf) if self._live else SimulatedBroker(pf)
+        self._group_locks[g.strategy_id] = asyncio.Lock()
         self._pending_buys.setdefault(g.strategy_id, [])
+        if g.picker not in self.pickers:
+            g.last_error = f"选股插件不存在: {g.picker} (可选: {list(self.pickers)})"
+            self._log(g.strategy_id, g.last_error)
 
     def _spawn(self, g: PickerGroup) -> None:
         t = self._tasks.get(g.strategy_id)
@@ -158,7 +162,6 @@ class StockPickerEngine:
         if g.picker not in self.pickers:
             return                                  # 插件缺失, 不起协程
         self._tasks[g.strategy_id] = asyncio.ensure_future(self._run_group(g))
-
     def start_all(self) -> None:
         self._started = True
         for g in self.groups.values():
@@ -215,6 +218,7 @@ class StockPickerEngine:
         self.brokers.pop(gid, None)
         self._pending_buys.pop(gid, None)
         self._quotes.pop(gid, None)
+        self._group_locks.pop(gid, None)
         if removed:
             self._log(gid, "动态删组 (历史持仓与流水已保留)")
         return removed
@@ -299,17 +303,24 @@ class StockPickerEngine:
             await asyncio.sleep(self.poll_seconds)
 
     async def _round(self, g: PickerGroup, force: bool = False) -> None:
-        """一轮扫描: 先卖 (保护持仓) 后买. force=True 无视盘中时段 (手动 run-once)."""
-        now = dt.datetime.now()
-        if not force and not is_market_open(now):
-            return
-        g.rounds += 1
-        g.last_sell_scan = now.isoformat(timespec="seconds")
-        await self._scan_sell(g)
-        if force or g.rounds == 1 or (g.buy_scan_every > 0
-                                      and g.rounds % g.buy_scan_every == 0):
-            g.last_buy_scan = dt.datetime.now().isoformat(timespec="seconds")
-            await self._scan_buy(g)
+        """一轮扫描: 先卖 (保护持仓) 后买. force=True 无视盘中时段 (手动 run-once).
+
+        组内串行锁: 常驻扫描协程与 Web run-once 并发触发同一组时排队执行,
+        防止两路扫描交叉下单/重复入库.
+        """
+        lock = self._group_locks.setdefault(g.strategy_id, asyncio.Lock())
+        async with lock:
+            now = dt.datetime.now()
+            if not force and not is_market_open(now):
+                return
+            g.rounds += 1
+            g.last_sell_scan = now.isoformat(timespec="seconds")
+            self._sold_this_round[g.strategy_id] = set()
+            await self._scan_sell(g)
+            if force or g.rounds == 1 or (g.buy_scan_every > 0
+                                          and g.rounds % g.buy_scan_every == 0):
+                g.last_buy_scan = dt.datetime.now().isoformat(timespec="seconds")
+                await self._scan_buy(g)
 
     # ------------------------------------------------------------- 卖出扫描 ----
     async def _scan_sell(self, g: PickerGroup) -> None:
@@ -387,6 +398,7 @@ class StockPickerEngine:
         self.db.add_event(g.strategy_id, pos["code"], "sell", int(pos["qty"]),
                           price, oid, dry_run=not self._live, status="filled",
                           detail=reason)
+        self._sold_this_round.setdefault(g.strategy_id, set()).add(pos["code"])
         self._log(g.strategy_id, f"卖出成交 {pos['code']} {pos['qty']}@{price:.3f} "
                   f"(order={oid}, {reason}, 盈亏≈{pnl:+.2f})")
 
@@ -428,7 +440,8 @@ class StockPickerEngine:
         holding = self.db.list_positions(strategy_id=gid, status="holding")
         selling = self.db.list_positions(strategy_id=gid, status="selling")
         held = ({p["code"] for p in holding} | {p["code"] for p in selling}
-                | {pb["code"] for pb in pending})
+                | {pb["code"] for pb in pending}
+                | self._sold_this_round.get(gid, set()))   # 当轮已卖出不回补
         n_active = len(holding) + len(selling) + len(pending)
         slots = (g.max_positions - n_active) if g.max_positions > 0 else len(candidates)
         for cand in candidates:
@@ -438,31 +451,48 @@ class StockPickerEngine:
                 break
             if cand.code in held:
                 continue
-            qty = g.per_qty or self._auto_qty(g, cand.price)
-            if qty <= 0:
-                self._log(gid, f"现金不足/整手为0, 跳过 {cand.code} @{cand.price:.3f}")
+            # 实时快照补全: 用最新价下单 (K线收盘价可能陈旧) + 补股票名称
+            # (fdata kline 无 name 字段, 名称只能来自 quote)
+            quote = await self._fetch_quote(cand.code)
+            last = float((quote or {}).get("last") or 0)
+            px = last if last > 0 else float(cand.price)
+            if px <= 0:
+                self._log(gid, f"无有效报价, 跳过 {cand.code}")
                 continue
-            ctx = self._make_ctx(g, cand.code, cand.price)
-            oid = await ctx.submit_order("buy", qty, price=cand.price)
+            name = str((quote or {}).get("name") or cand.name or "")
+            qty = g.per_qty or self._auto_qty(g, px)
+            # 现金约束: 固定股数/自动整手都不得超过组内可用资金 (防现金负数/实盘废单)
+            affordable = int(max(pf.cash, 0.0) // px // LOT * LOT)
+            if qty > affordable:
+                if affordable <= 0:
+                    self._log(gid, f"组内现金不足, 跳过 {cand.code} @{px:.3f}")
+                    continue
+                self._log(gid, f"组内现金不足, {cand.code} 数量 {qty} 下调为 {affordable}")
+                qty = affordable
+            if qty <= 0:
+                self._log(gid, f"现金不足/整手为0, 跳过 {cand.code} @{px:.3f}")
+                continue
+            ctx = self._make_ctx(g, cand.code, px)
+            oid = await ctx.submit_order("buy", qty, price=px)
             self.pfs[gid].save()
             o = pf.orders.get(oid)
             status = o.status if o else ""
-            pb = {"code": cand.code, "name": cand.name, "qty": qty,
-                  "price": cand.price, "reason": cand.reason, "order_id": oid,
+            pb = {"code": cand.code, "name": name, "qty": qty,
+                  "price": px, "reason": cand.reason, "order_id": oid,
                   "ts": dt.datetime.now().isoformat(timespec="seconds")}
             if status == "filled":                      # 模拟/dry-run: 立即成交
-                self._record_buy(g, pb, o.avg_fill_price or cand.price, qty)
+                self._record_buy(g, pb, o.avg_fill_price or px, qty)
             elif status == "rejected":
-                self.db.add_event(gid, cand.code, "buy", qty, cand.price, oid,
+                self.db.add_event(gid, cand.code, "buy", qty, px, oid,
                                   dry_run=not self._live, status="rejected",
                                   detail=o.error)
                 self._log(gid, f"买入被拒 {cand.code}: {o.error}")
             else:                                       # 实盘已提交, 等异步回报
                 pending.append(pb)
-                self.db.add_event(gid, cand.code, "buy", qty, cand.price, oid,
+                self.db.add_event(gid, cand.code, "buy", qty, px, oid,
                                   dry_run=not self._live, status="submitted",
                                   detail=cand.reason)
-                self._log(gid, f"买入指令已提交 {cand.code} {qty}@{cand.price:.3f} "
+                self._log(gid, f"买入指令已提交 {cand.code} {qty}@{px:.3f} "
                           f"(order={oid}, {cand.reason})")
             slots -= 1
 

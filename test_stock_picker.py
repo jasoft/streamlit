@@ -67,7 +67,9 @@ class PickerEnv:
 
     async def _quote(self, code: str):
         px = self.prices.get(code)
-        return {"last": px, "pre_close": px} if px else None
+        # fdata quote 平铺结构: last/pre_close/name (名称来自 quote, K线无 name)
+        return ({"last": px, "pre_close": px, "name": f"名称{code[-3:]}"}
+                if px else None)
 
     async def _bars(self, code: str, limit: int):
         return []
@@ -111,6 +113,9 @@ def test_buy_records_into_buy_group():
                                                      ("600519", 1000)}, rows
     assert all(r["strategy_id"] == "g1" for r in rows)
     assert all(r["buy_reason"] == "RSI 超卖" for r in rows)
+    # 名称来自实时快照, 不得与代码相同 (选股名称 bug 回归)
+    assert all(r["name"] and r["name"] != r["code"] for r in rows), rows
+    assert all(r["buy_price"] > 0 for r in rows)
     buys = [e for e in snap["events"] if e["side"] == "buy" and e["status"] == "filled"]
     assert len(buys) == 2, buys
     pf = snap["portfolios"]["g1"]
@@ -202,6 +207,22 @@ def test_groups_independent():
     print("  ✓ 多策略组彼此独立 (参数/持仓/资金)")
 
 
+def test_buy_respects_group_cash():
+    """现金约束: 固定股数超组内资金时下调到整手可负担量, 现金不为负."""
+    cfg = group_cfg("g6", ["601899"])
+    cfg["per_qty"] = 100000                          # 远超 10 万组资金
+    picker_db.upsert_group(cfg)
+    env = PickerEnv([cfg], {"601899": 9.0})
+    env.plugin.candidates = [PickCandidate(code="601899", price=9.0)]
+    snap = asyncio.run(env.run_once("g6"))
+    rows = picker_db.list_positions(strategy_id="g6", status="holding")
+    assert len(rows) == 1
+    expect = 100_000 // 9 // 100 * 100               # 可负担的最大整手数 = 11100
+    assert rows[0]["qty"] == expect, rows[0]
+    assert snap["portfolios"]["g6"]["cash"] >= 0
+    print("  ✓ 现金约束 (数量下调, 现金不为负)")
+
+
 def test_db_constraints_and_crud():
     """同组同码活动持仓唯一; 组 CRUD."""
     picker_db.upsert_group(group_cfg("g5", ["601899"]))
@@ -221,7 +242,8 @@ def test_db_constraints_and_crud():
 def main() -> None:
     for fn in (test_buy_records_into_buy_group, test_dedup_and_max_positions,
                test_sell_closes_position, test_t1_protect,
-               test_groups_independent, test_db_constraints_and_crud):
+               test_groups_independent, test_buy_respects_group_cash,
+               test_db_constraints_and_crud):
         fn()
     print("\n全部通过 ✓")
 

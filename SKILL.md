@@ -971,3 +971,28 @@ uv run python test_stock_picker.py                  # 引擎单测(假行情, �
 **新增选股插件**: 在 `trading/picker_strategies/` 放一个 py 文件, 暴露 `PickStrategy` 子类
 (唯一 `ID` + `PARAMS` 默认值), 实现 `select()`(返回候选) 与 `sell_reason()`(返回卖出原因串),
 重启后端即被发现; 插件不做任何下单/记账, 同一插件可挂多个策略组(参数按组覆盖)。
+
+### A.4 测试与多 worktree 隔离
+
+- `uv run python test_stock_picker.py` — 引擎单测 (假行情, 不依赖盘中/fdata): 入库挂钩/去重限仓/
+  卖出平仓/T+1/组间独立/现金约束/DB约束。
+- `uv run python test_e2e_picker.py` — **全链路 e2e (真实 fdata 行情)**: 自起独立端口后端+前端
+  (临时 SQLite, 不碰主 worktree), 覆盖 运行文件复制/API 全量+校验/选股买入(名称≠代码回归)/
+  买卖闭环(t1_protect=false + 宽松卖出参数)/volume_breakout/前端代理, 23 项断言, 结束自动清现场。
+  前提: fdata serve 已运行 (9701)。
+- **多 worktree 端口隔离**: worktree 根放 `.env.worktree` (已 gitignore) 声明
+  `BACKEND_PORT/FRONTEND_PORT`, dev.sh 自动加载 (本 worktree: 后端 8002 / 前端 3002);
+  fdata (9701) 已在监听则直接复用不重启, 清理与退出都不会误杀共享 fdata 或其他 worktree 的
+  uvicorn (pkill 按 `--port` 收窄)。next.config.ts 的 rewrite 跟随 BACKEND_PORT。
+
+### A.5 实现要点 (踩坑记录)
+
+- **股票名称来源**: fdata kline 无 name 字段, 名称与最新下单价都由引擎在买入前用实时快照
+  (`fdata_client.quote`) 补全 — 插件 select() 只从 K 线拿价格, name 留空串。
+- **插件参数解析必须用 `PickStrategy.p(params, key, default)`**: `params.get(k) or default`
+  会把合法的 0/False 覆盖值 (如 vol_ratio=0 不设门槛) 吞掉回退默认值。
+- **现金约束**: 固定 per_qty 超过组内可用现金时自动下调到整手可负担量 (日志可见), 现金不为负、
+  实盘不产生废单。
+- **卖出当轮不回补**: 同一轮扫描内已卖出/在卖的标的, 买入扫描跳过, 防止"卖了立刻买回"换手
+  (T+1 下还会锁仓)。
+- **组内串行锁**: 常驻扫描协程与 Web run-once 并发触发同一组时排队执行, 防交叉下单。

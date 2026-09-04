@@ -33,10 +33,10 @@ class RsiReboundPicker(PickStrategy):
     }
 
     async def select(self, universe: list[str], params: dict) -> list[PickCandidate]:
-        limit = int(params.get("kline_limit") or 60)
-        rsi_buy = float(params.get("rsi_buy") or 25.0)
-        vol_ratio = float(params.get("vol_ratio") or 1.5)
-        vol_days = max(int(params.get("vol_days") or 5), 1)
+        limit = int(self.p(params, "kline_limit", 60))
+        rsi_buy = float(self.p(params, "rsi_buy", 25.0))
+        vol_ratio = float(self.p(params, "vol_ratio", 1.5))
+        vol_days = max(int(self.p(params, "vol_days", 5)), 1)
         out: list[PickCandidate] = []
         for code in universe:                       # 串行拉取: serve 长连接复用, 不轰数据源
             try:
@@ -59,8 +59,9 @@ class RsiReboundPicker(PickStrategy):
             vr = vol / avg_vol
             r6 = self.rsi(closes, 6)
             if r6 <= rsi_buy and vr >= vol_ratio:
+                # 名称不在日K数据里, 由引擎用实时快照补全, 这里只给空串占位
                 out.append(PickCandidate(
-                    code=code, name=str(last.get("name") or code), price=px,
+                    code=code, name=str(last.get("name") or ""), price=px,
                     reason=f"RSI6={r6:.1f}≤{rsi_buy:g} 且量比{vr:.2f}≥{vol_ratio:g}",
                     score=-r6))                     # RSI 越低越优先
         out.sort(key=lambda c: c.score, reverse=True)
@@ -75,13 +76,13 @@ class RsiReboundPicker(PickStrategy):
             return ""
         buy_px = float(pos.get("buy_price") or 0)
         pnl = self.pct(last, buy_px)
-        tp = float(params.get("take_profit_pct") or 10.0)
-        sl = float(params.get("stop_loss_pct") or -5.0)
+        tp = float(self.p(params, "take_profit_pct", 10.0))
+        sl = float(self.p(params, "stop_loss_pct", -5.0))
         if buy_px > 0 and pnl <= sl:
             return f"止损 {pnl:.2f}% ≤ {sl:g}%"
         if buy_px > 0 and pnl >= tp:
             return f"止盈 {pnl:.2f}% ≥ {tp:g}%"
-        rsi_sell = float(params.get("rsi_sell") or 55.0)
+        rsi_sell = float(self.p(params, "rsi_sell", 55.0))
         r6 = self.rsi(self.closes(bars), 6)
         if r6 >= rsi_sell:
             return f"RSI6={r6:.1f}≥{rsi_sell:g} 超卖修复"

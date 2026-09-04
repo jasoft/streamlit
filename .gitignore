@@ -29,3 +29,5 @@ stockview/check_names.py
 stockview/debug_*.py
 stockview/test_*.html
 test_playwright.py
+.env.worktree
+backend/stockpicker.db
