@@ -110,6 +110,9 @@
 │   ├── grid_orders.json        网格配置+状态持久化
 │   ├── portfolios.json         组合配置+执行历史持久化
 │   ├── store.py                图会话 SQLite 持久化 (charts.db)
+│   ├── conditions.py           条件单 Web 管理层 (引擎生命周期+持久化)
+│   ├── grids.py                网格单 Web 管理层
+│   ├── watchlist.py            自选股管理 (持仓自动同步+tombstone)
 │   └── charts.db               SQLite 数据库文件
 │
 ├── strategy/                   ★ 策略框架核心
@@ -263,7 +266,10 @@ uv run python trading/test_portfolio_logic.py
 | `/conditions` | `conditions/page.tsx` | ⚡ 条件单管理（§10.4）                      |
 | `/grids`    | `grids/page.tsx`    | 🌐 网格交易管理（§11.3）                      |
 | `/portfolios` | `portfolios/page.tsx` | 🧺 组合交易（人工ETF, §12.3）                |
+| `/watchlist` | `watchlist/page.tsx` | ⭐ 自选股（同花顺持仓自动同步 + 手动增删 + 实时行情） |
 | `/config`   | `config/page.tsx`   | 策略参数在线配置（写 config.json）               |
+
+**SymbolPicker 组件**（`components/SymbolPicker.tsx`）：自选股代码选择器，接入所有需要输入股票代码的地方（charts 新建图 / conditions / grids / backtest 追加）。聚焦展开自选股下拉（代码/名称模糊过滤），点选回填归一化 symbol；同时保留手动输入任意代码的能力。数据走 `lib/watchlist.ts` 共享缓存（30s TTL + 广播刷新）。
 
 ### 5.2 图表组件（KLineChart + IntradayChart）
 
@@ -364,6 +370,11 @@ formatStat("total_return", 2.023) // → "202.3%" 自动识别类型+格式化
 | GET  | `/api/portfolios/{pid}/preview`   | 分配/调仓预览（不下单）               | action=buy\|sell\|sync, amount             |
 | POST | `/api/portfolios/{pid}/buy\|sell` | 按权重买卖一篮子                   | total\_amount, dry\_run, pad\_pct          |
 | POST | `/api/portfolios/{pid}/sync`      | 同步仓位（人工ETF调仓, 先卖后买）        | dry\_run, pad\_pct, min\_order\_value      |
+| GET  | `/api/watchlist`                  | 自选股列表 + 同步状态               | —                                         |
+| POST | `/api/watchlist`                  | 添加自选股（名称自动从行情补全）          | symbol, name?                             |
+| DELETE | `/api/watchlist/{symbol}`       | 删除自选股（tombstone，自动同步不回加）   | —                                         |
+| POST | `/api/watchlist/sync`             | 立即同步同花顺持仓入自选股              | —                                         |
+| PUT  | `/api/watchlist/settings`         | 开关持仓自动同步                   | body: {auto_sync}                         |
 
 ### 6.2 WebSocket 端点
 

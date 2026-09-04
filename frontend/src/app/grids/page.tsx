@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import SymbolPicker from "@/components/SymbolPicker";
 
 // ---- 类型 (对应 GET /api/grids 返回) ----
 type GridRow = {
@@ -334,9 +335,10 @@ export default function GridsPage() {
               <label className="text-xs text-[#888] space-y-1 col-span-2 md:col-span-2">
                 <div>标的代码</div>
                 <div className="flex gap-2">
-                  <input value={symbol} onChange={(e) => setSymbol(e.target.value)}
+                  <SymbolPicker value={symbol} onChange={setSymbol}
                     placeholder="601899 / sz159915"
-                    className={`${inputCls} w-full`} />
+                    inputClassName={`${inputCls} w-full`}
+                    wrapClassName="flex-1 min-w-0" />
                   <button type="button" onClick={fetchQuote} disabled={busy}
                     className="whitespace-nowrap text-xs px-2 py-1 rounded border border-[#2a5a7a] text-[#4fc3f7] hover:bg-[#0d2a3a]">
                     取当前价

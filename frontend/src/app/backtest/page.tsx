@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { api } from "@/lib/api";
+import SymbolPicker from "@/components/SymbolPicker";
 import * as echarts from "echarts";
 import type { EChartsOption } from "echarts";
 import { useEffect, useRef } from "react";
@@ -132,6 +133,11 @@ export default function BacktestPage() {
             onChange={(e) => setSymbols(e.target.value)}
             className="bg-[#1a1a1a] border border-[#333] rounded px-3 py-1.5 text-sm w-48"
           />
+        </div>
+        <div>
+          <label className="block text-xs text-[#666] mb-1">从自选股添加</label>
+          <SymbolPicker mode="append" value={symbols} onChange={setSymbols}
+            width="w-40" placeholder="搜索代码/名称" />
         </div>
       </div>
 

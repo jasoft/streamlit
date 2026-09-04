@@ -104,4 +104,13 @@ export const api = {
   portfolioSync: (id: string, body: any) =>
     fetchJSON(`/portfolios/${encodeURIComponent(id)}/sync`,
       { method: "POST", body: JSON.stringify(body) }),
+  // --- 自选股 ---
+  watchlist: () => fetchJSON<any>("/watchlist"),
+  addWatchStock: (body: { symbol: string; name?: string }) =>
+    fetchJSON("/watchlist", { method: "POST", body: JSON.stringify(body) }),
+  deleteWatchStock: (symbol: string) =>
+    fetchJSON(`/watchlist/${encodeURIComponent(symbol)}`, { method: "DELETE" }),
+  syncWatchlist: () => fetchJSON("/watchlist/sync", { method: "POST" }),
+  watchlistSettings: (body: { auto_sync?: boolean }) =>
+    fetchJSON("/watchlist/settings", { method: "PUT", body: JSON.stringify(body) }),
 };

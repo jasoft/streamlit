@@ -8,6 +8,7 @@ import KLineChart, {
   fmtMoney, fmtPrice, fmtPct, fmtNum,
 } from "@/components/KLineChart";
 import ParamForm, { type ParamSchema } from "@/components/ParamForm";
+import SymbolPicker from "@/components/SymbolPicker";
 
 type StratInfo = { name: string; title: string; [k: string]: any };
 
@@ -634,18 +635,18 @@ export default function ChartsPage() {
           <div className="flex items-end gap-2">
             <div className="flex flex-col gap-0.5">
               <label className="text-[10px] text-[#666]">标的</label>
-              <input
-                list="syms" value={fSymbol}
-                onChange={(e) => { setFSymbol(e.target.value); setFormError(null); }}
+              <SymbolPicker
+                value={fSymbol}
+                onChange={(v) => { setFSymbol(v); setFormError(null); }}
                 onKeyDown={(e) => { if (e.key === "Enter") handleCreate(); }}
                 placeholder="如 sz159915"
-                className={`bg-[#1a1a1a] border rounded px-2 py-1 text-xs text-[#e0e0e0] outline-none w-32 focus:border-[#4fc3f7] ${
+                width="w-32"
+                invalid={!!formError}
+                extraSymbols={COMMON_SYMBOLS}
+                inputClassName={`bg-[#1a1a1a] border rounded px-2 py-1 text-xs text-[#e0e0e0] outline-none w-32 focus:border-[#4fc3f7] ${
                   formError ? "border-[#ef5350]" : "border-[#2a2a2a]"
                 }`}
               />
-              <datalist id="syms">
-                {COMMON_SYMBOLS.map((s) => <option key={s} value={s} />)}
-              </datalist>
             </div>
             <div className="flex flex-col gap-0.5">
               <label className="text-[10px] text-[#666]">周期</label>

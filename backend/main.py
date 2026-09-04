@@ -35,6 +35,11 @@ API 设计:
     POST /api/portfolios/{pid}/sell      按权重卖出一篮子 {total_amount, dry_run}
     POST /api/portfolios/{pid}/sync      同步仓位 (人工ETF调仓) {dry_run, min_order_value}
     GET  /api/positions                  同花顺实际持仓 (subprocess ths_trade)
+    GET  /api/watchlist                  自选股列表 + 同步状态
+    POST /api/watchlist                  添加自选股 {symbol, name?}
+    DELETE /api/watchlist/{symbol}       删除自选股 (tombstone, 自动同步不回加)
+    POST /api/watchlist/sync             立即同步同花顺持仓入自选股
+    PUT  /api/watchlist/settings         {auto_sync: bool} 开关持仓自动同步
     GET  /api/quote/{symbol}             实时快照
   WebSocket:
     WS /ws/market?symbols=sz159915,sh510300
@@ -820,6 +825,63 @@ async def sync_portfolio(pid: str, req: PortfolioSyncReq):
                                     dry_run=req.dry_run)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
+# --- 自选股 (watchlist): 手动增删 + 同花顺持仓自动同步 (backend/watchlist.py) ---
+from backend import watchlist as watchlist_mgr  # noqa: E402
+
+
+class WatchlistAddReq(BaseModel):
+    symbol: str
+    name: str = ""          # 可选; 空则尝试用实时快照补全
+
+
+class WatchlistSettingsReq(BaseModel):
+    auto_sync: Optional[bool] = None
+
+
+@app.get("/api/watchlist")
+def get_watchlist():
+    """自选股全量: 股票列表 + 自动同步开关 + 最近一次同步时间/错误."""
+    return watchlist_mgr.get_status()
+
+
+@app.post("/api/watchlist")
+async def add_watch_stock(req: WatchlistAddReq):
+    """添加自选股. 未传 name 时后台取一次实时快照补全 (失败不阻塞添加)."""
+    name = req.name.strip()
+    if not name:
+        try:
+            snap = await asyncio.to_thread(trader.fetch_quote_snapshot,
+                                           req.symbol.strip())
+            name = str(snap.get("name") or "")
+        except Exception:
+            name = ""  # 数据源不可用也允许先加入, 名称留空
+    try:
+        entry = watchlist_mgr.add_stock(req.symbol, name=name, source="manual")
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "stock": entry}
+
+
+@app.delete("/api/watchlist/{symbol}")
+async def delete_watch_stock(symbol: str):
+    if not watchlist_mgr.remove_stock(symbol):
+        return JSONResponse(status_code=404,
+                            content={"detail": f"自选股 {symbol} 不存在"})
+    return {"ok": True}
+
+
+@app.post("/api/watchlist/sync")
+async def sync_watchlist():
+    """立即拉一次同花顺持仓并入自选股 (与后台自动同步互斥, 不会并发跑)."""
+    return await watchlist_mgr.sync_positions_async()
+
+
+@app.put("/api/watchlist/settings")
+async def watchlist_settings(req: WatchlistSettingsReq):
+    if req.auto_sync is not None:
+        watchlist_mgr.set_auto_sync(req.auto_sync)
+    st = watchlist_mgr.get_status()
+    return {"ok": True, "auto_sync": st["auto_sync"]}
 
 
 # --- 启停 / 执行 ---
@@ -1026,6 +1088,17 @@ async def _start_tick_loop():
     global _tick_task, _tick_symbols
     _tick_symbols = ["sz159915", "sh510300", "sh000001"]
     _tick_task = asyncio.create_task(_tick_loop(_tick_symbols))
+
+
+@app.on_event("startup")
+async def _start_watchlist_sync():
+    """自选股: 启动同花顺持仓自动同步后台协程 (默认 120s 一轮)."""
+    watchlist_mgr.startup()
+
+
+@app.on_event("shutdown")
+async def _stop_watchlist_sync():
+    watchlist_mgr.shutdown()
 
 
 @app.on_event("shutdown")
