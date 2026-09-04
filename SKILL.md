@@ -88,6 +88,9 @@
 │       │   ├── page.tsx        根路径 → 重定向 /charts
 │       │   ├── charts/page.tsx ★ 图会话主页 (多图+策略挂载+流式测试)
 │       │   ├── backtest/page.tsx   批量回测
+│       │   ├── conditions/page.tsx ⚡ 条件单
+│       │   ├── grids/page.tsx      🌐 网格
+│       │   ├── portfolios/page.tsx 🧺 组合交易 (人工ETF)
 │       │   └── config/page.tsx     策略参数配置
 │       ├── components/
 │       │   ├── KLineChart.tsx      ★ K线图 (ECharts 6, 拖拽缩放, marker双轨匹配)
@@ -100,6 +103,12 @@
 │
 ├── backend/                    ★ FastAPI 后端 (:8000)
 │   ├── main.py                 ★ 全部 REST + WebSocket 端点
+│   ├── conditions.py           条件单 Web 管理层 (引擎跑在 FastAPI 进程内)
+│   ├── grids.py                网格单 Web 管理层
+│   ├── portfolios.py           组合交易 Web 管理层 (行情/持仓组装 + 执行编排)
+│   ├── condition_orders.json   条件单配置+状态持久化 (CLI 与 Web 共用)
+│   ├── grid_orders.json        网格配置+状态持久化
+│   ├── portfolios.json         组合配置+执行历史持久化
 │   ├── store.py                图会话 SQLite 持久化 (charts.db)
 │   └── charts.db               SQLite 数据库文件
 │
@@ -131,16 +140,17 @@
 │       ├── intraday_t.py       日内做T (5分钟, 参数待调优)
 │       └── tick_buy_sell.py    tick级策略模板
 │
-├── scripts/
+├── trading/                    ★ 交易执行层 (原 scripts/ 全部迁入)
 │   ├── fdata.py                ★★★ 统一金融数据 CLI + TCP长连接服务器
 │   ├── ths_trade.py            ★★★ 同花顺 Mac GUI 自动交易 (AX API)
+│   ├── ths_api.py              ths_trade RESTful 包装 (FastAPI :8010, 全局锁串行)
 │   ├── condition_orders.py     ★ 条件单引擎 (WATCH→ARMED→DONE状态机)
 │   ├── grid_orders.py          ★ 网格交易引擎 (区间低吸高抛, 基准价滚动)
+│   ├── portfolios.py           ★ 组合交易引擎 (人工ETF: 权重买卖篮子+同步仓位)
 │   ├── test_grid_logic.py      网格引擎逻辑测试 (24 断言, 离线)
+│   ├── test_portfolio_logic.py 组合引擎逻辑测试 (59 断言, 离线)
 │   ├── check_window.py         调试: 同花顺 AX 窗口树检查
-│   ├── stress_test.py          下单压测脚本
-│   ├── extreme_fill_test.py    极端填单测试
-│   └── example_tick_strategy.py tick策略示例
+│   └── stress_test.py / extreme_fill_test.py / example_tick_strategy.py 压测/示例
 │
 ├── stockview/                  旧 Streamlit 行情仪表盘(保留, 非主流程)
 │   ├── app.py                  Streamlit 入口
@@ -213,6 +223,9 @@ uv run python trading/condition_orders.py --poll 5
 
 # 网格交易（模拟模式, 安全）
 uv run python trading/grid_orders.py --poll 5
+
+# 组合交易（离线逻辑测试, 不碰行情/同花顺）
+uv run python trading/test_portfolio_logic.py
 ```
 
 ***
@@ -226,6 +239,9 @@ uv run python trading/grid_orders.py --poll 5
 | `/`         | `page.tsx`          | 根路径 → 重定向到 `/charts`（已删除的 /live 绝不跳转） |
 | `/charts`   | `charts/page.tsx`   | ★ 核心页：多图会话管理 + 策略挂载 + 流式测试 + 账户快照     |
 | `/backtest` | `backtest/page.tsx` | 批量回测多策略多标的 + 参数网格                     |
+| `/conditions` | `conditions/page.tsx` | ⚡ 条件单管理（§10.4）                      |
+| `/grids`    | `grids/page.tsx`    | 🌐 网格交易管理（§11.3）                      |
+| `/portfolios` | `portfolios/page.tsx` | 🧺 组合交易（人工ETF, §12.3）                |
 | `/config`   | `config/page.tsx`   | 策略参数在线配置（写 config.json）               |
 
 ### 5.2 图表组件（KLineChart + IntradayChart）
@@ -321,6 +337,12 @@ formatStat("total_return", 2.023) // → "202.3%" 自动识别类型+格式化
 | POST | `/api/strategies/{name}/start`    | 启动策略进程                     | —                                         |
 | POST | `/api/strategies/{name}/stop`     | 停止策略进程                     | —                                         |
 | POST | `/api/strategies/{name}/run-once` | 立刻 dry-run 跑一轮             | —                                         |
+| GET  | `/api/portfolios`                 | 组合列表+实时价+同花顺持仓对照           | with\_positions                           |
+| POST | `/api/portfolios`                 | 创建组合（权重自动归一）               | name, items\[{code,weight}]                |
+| PUT  | `/api/portfolios/{pid}`           | 组合调整（增减个股/改权重）             | items / name / note                       |
+| GET  | `/api/portfolios/{pid}/preview`   | 分配/调仓预览（不下单）               | action=buy\|sell\|sync, amount             |
+| POST | `/api/portfolios/{pid}/buy\|sell` | 按权重买卖一篮子                   | total\_amount, dry\_run, pad\_pct          |
+| POST | `/api/portfolios/{pid}/sync`      | 同步仓位（人工ETF调仓, 先卖后买）        | dry\_run, pad\_pct, min\_order\_value      |
 
 ### 6.2 WebSocket 端点
 
@@ -816,7 +838,66 @@ CLI：`uv run python trading/grid_orders.py [--live] [--cash 100000] [--poll 5]`
 
 ***
 
-## 十二、常见 Bug 排查速查
+## 十二、组合交易引擎（portfolios.py）— 人工ETF
+
+与网格/条件单不同：**无常驻盯盘引擎**，是"手动触发的一次性批量执行器"。
+把一篮子股票/ETF 按权重当作一只自建 ETF 来管理：创建组合 → 按总金额+权重一键
+买入 → 按卖出金额+权重卖出 → 组合调整（增减个股/改权重）→ 同步仓位：真实持仓
+按新配比动态对齐（= 人工调整权重的 ETF 调仓）。
+
+### 12.1 分配算法（trading/portfolios.py 纯函数, 离线可测）
+
+| 操作 | 口径 |
+| ---- | ---- |
+| 买入 | amount_i = 总金额×w_i/100 → 整手 floor → 剩余预算按权重从大到小逐只补一手（资金利用率） |
+| 卖出 | amount_i = 卖出金额×w_i/100 → 贴近目标取整手(half-up)；可卖数量封顶(T+1)；≥99.9% 持仓市值含零股清仓；零股(<100)整笔清 |
+| 同步 | total = 组合内 + 已移出成分的持仓市值；target_i = total×w_i；差额生成先卖后买订单；买入凑不满一手或 <min_order_value 跳过；**移出成分(removed_codes)整笔清仓**（ETF 剔除成分口径）；无关持仓只展示不动 |
+| 限价 | 现价×(1±pad%)，按品种 tick 取整（5/1 开头 0.001，其余 0.01），买向上/卖向下保成交 |
+| 权重 | item.weight 存百分比，创建/调整时自动归一到 100（只存相对比例） |
+
+### 12.2 执行链路与安全
+
+- `dry_run=true`（默认）：纯试算，**不碰同花顺**；前端先预览后执行两步走
+- `dry_run=false`：先卖后买逐笔 subprocess `ths_trade.py buy/sell --price <限价>`
+  （显式传价 = 硬约束 #8），成功/失败按券商弹窗关键词判定（与 LiveBroker 同款）
+- 同花顺 GUI 互斥：backend/portfolios.py 一把 asyncio.Lock 串行（持仓读取 + 真实下单）
+- 执行历史随组合存 `backend/portfolios.json`（最近 50 条）；组合调整记录
+  removed_codes，同步时自动清仓已移出成分
+
+### 12.3 Web 管理（前端「🧺 组合」Tab, 2026-09 新增）
+
+顶部导航「🧺 组合」(`/portfolios`)：
+
+- **创建组合**：比例(%)/金额(元)/股数 三种录入模式（后两种自动折算权重），
+  代码失焦自动带名称/现价
+- **组合卡片**：目标权重 vs 同花顺真实持仓对照（现价/持仓/可卖/市值/实际权重/偏差pp）
+- **买入/卖出**：总金额 + 预览分配表 → 确认执行；卖出有 25%/50%/全部 快捷按钮
+- **同步仓位**：计算调仓计划（目标市值/差额/方向/组合外持仓展示）→ 确认执行
+- **调整**：行内增减成分、改权重；移出的成分在下次同步时按剔除口径清仓
+- **执行历史**：每次真实执行落档（各笔受理/失败 + 券商文案）
+
+REST API（FastAPI :8000）：
+
+```
+GET    /api/portfolios                     组合列表 + 实时价 + 持仓对照 (with_positions=0 跳过持仓)
+POST   /api/portfolios                     创建组合 {name, items:[{code, weight, name?}]}
+PUT    /api/portfolios/{pid}               组合调整 {items? / name? / note?}
+DELETE /api/portfolios/{pid}               删除组合 (只删配比记录, 不动持仓)
+GET    /api/portfolios/{pid}/preview       预览 ?action=buy|sell|sync&amount=&min_order_value=
+POST   /api/portfolios/{pid}/buy|sell      {total_amount, dry_run=true, pad_pct=0.3}
+POST   /api/portfolios/{pid}/sync          {dry_run=true, pad_pct=0.3, min_order_value=1000}
+```
+
+测试：`uv run python trading/test_portfolio_logic.py`（59 断言离线）；
+`uv run python tests/test_portfolios_api.py`（27 断言 TestClient 打桩）。
+
+注意：**同步仓位会真实清仓已移出成分**，执行前务必预览确认；同花顺未运行时持仓
+显示 `?`，卖出/同步不可用；组合交易不走 runtime 层 Portfolio（无模拟账户状态），
+直接对真实账户编排，与网格/条件单的模拟账户互不影响。
+
+***
+
+## 十三、常见 Bug 排查速查
 
 ### 前端图表类
 
@@ -859,7 +940,7 @@ CLI：`uv run python trading/grid_orders.py [--live] [--cash 100000] [--poll 5]`
 
 ***
 
-## 十三、硬约束清单（任何情况下都不得违反）
+## 十四、硬约束清单（任何情况下都不得违反）
 
 1. **成交口径统一**: 收盘出信号 → 次日开盘成交。回测 vbt\_adapter shift(1)+price=open；实盘 BacktestBroker flush\_pending(下根 open)。任何时候不能让"当日 close 信号当日 close 成交"（未来函数）
 2. **策略信号统一 target position 0/1**，不是买卖动作。策略代码中**禁止出现** **`if backtest/if live`** **分支判断**，保持 Write Once Run Anywhere
@@ -877,7 +958,7 @@ CLI：`uv run python trading/grid_orders.py [--live] [--cash 100000] [--poll 5]`
 
 ***
 
-## 十四、部署架构
+## 十五、部署架构
 
 ### 当前状态（本地开发）
 
