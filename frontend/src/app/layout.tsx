@@ -14,6 +14,7 @@ const nav = [
   { href: "/backtest", label: "回测", icon: "📈" },
   { href: "/conditions", label: "条件单", icon: "⚡" },
   { href: "/grids", label: "网格", icon: "🌐" },
+  { href: "/watchlist", label: "自选股", icon: "⭐" },
   { href: "/config", label: "配置", icon: "⚙️" },
 ];
 

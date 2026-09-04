@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import SymbolPicker from "@/components/SymbolPicker";
 
 // ---- 类型 (对应 GET /api/conditions 返回) ----
 type CondOrder = {
@@ -224,9 +225,8 @@ export default function ConditionsPage() {
         <div className="flex flex-wrap items-end gap-4">
           <label className="text-xs text-[#888] space-y-1">
             <div>标的代码</div>
-            <input value={symbol} onChange={(e) => setSymbol(e.target.value)}
-              placeholder="601899 / sz159915"
-              className="bg-[#1a1a1a] border border-[#333] rounded px-2 py-1 w-36 font-mono text-sm text-white placeholder-[#555]" />
+            <SymbolPicker value={symbol} onChange={setSymbol}
+              placeholder="601899 / sz159915" width="w-36" />
           </label>
           <label className="text-xs text-[#888] space-y-1">
             <div>触发跌幅 % (负=低开买入)</div>

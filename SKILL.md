@@ -101,6 +101,9 @@
 ├── backend/                    ★ FastAPI 后端 (:8000)
 │   ├── main.py                 ★ 全部 REST + WebSocket 端点
 │   ├── store.py                图会话 SQLite 持久化 (charts.db)
+│   ├── conditions.py           条件单 Web 管理层 (引擎生命周期+持久化)
+│   ├── grids.py                网格单 Web 管理层
+│   ├── watchlist.py            自选股管理 (持仓自动同步+tombstone)
 │   └── charts.db               SQLite 数据库文件
 │
 ├── strategy/                   ★ 策略框架核心
@@ -226,7 +229,12 @@ uv run python trading/grid_orders.py --poll 5
 | `/`         | `page.tsx`          | 根路径 → 重定向到 `/charts`（已删除的 /live 绝不跳转） |
 | `/charts`   | `charts/page.tsx`   | ★ 核心页：多图会话管理 + 策略挂载 + 流式测试 + 账户快照     |
 | `/backtest` | `backtest/page.tsx` | 批量回测多策略多标的 + 参数网格                     |
+| `/conditions` | `conditions/page.tsx` | 条件单管理（引擎启停 + 新增/删除，状态机 WATCH→ARMED→DONE） |
+| `/grids` | `grids/page.tsx` | 网格单管理（引擎启停 + 新建/暂停/恢复/删除） |
+| `/watchlist` | `watchlist/page.tsx` | ⭐ 自选股（同花顺持仓自动同步 + 手动增删 + 实时行情） |
 | `/config`   | `config/page.tsx`   | 策略参数在线配置（写 config.json）               |
+
+**SymbolPicker 组件**（`components/SymbolPicker.tsx`）：自选股代码选择器，接入所有需要输入股票代码的地方（charts 新建图 / conditions / grids / backtest 追加）。聚焦展开自选股下拉（代码/名称模糊过滤），点选回填归一化 symbol；同时保留手动输入任意代码的能力。数据走 `lib/watchlist.ts` 共享缓存（30s TTL + 广播刷新）。
 
 ### 5.2 图表组件（KLineChart + IntradayChart）
 
@@ -321,6 +329,11 @@ formatStat("total_return", 2.023) // → "202.3%" 自动识别类型+格式化
 | POST | `/api/strategies/{name}/start`    | 启动策略进程                     | —                                         |
 | POST | `/api/strategies/{name}/stop`     | 停止策略进程                     | —                                         |
 | POST | `/api/strategies/{name}/run-once` | 立刻 dry-run 跑一轮             | —                                         |
+| GET  | `/api/watchlist`                  | 自选股列表 + 同步状态               | —                                         |
+| POST | `/api/watchlist`                  | 添加自选股（名称自动从行情补全）          | symbol, name?                             |
+| DELETE | `/api/watchlist/{symbol}`       | 删除自选股（tombstone，自动同步不回加）   | —                                         |
+| POST | `/api/watchlist/sync`             | 立即同步同花顺持仓入自选股              | —                                         |
+| PUT  | `/api/watchlist/settings`         | 开关持仓自动同步                   | body: {auto_sync}                         |
 
 ### 6.2 WebSocket 端点
 
