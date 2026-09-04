@@ -609,7 +609,7 @@ async def get_quote(symbol: str):
 
 # --- 选股自动交易 (trading/stock_picker.py 引擎的 Web 管理端) ---
 from backend import stockpicker as picker_mgr  # noqa: E402
-from trading.picker_strategies import registry as picker_registry  # noqa: E402
+from trading import picker_rules  # noqa: E402
 
 
 class PickerGroupReq(BaseModel):
@@ -652,8 +652,91 @@ async def get_picker():
 
 @app.get("/api/picker/pickers")
 def get_picker_catalog():
-    """可用选股插件目录 (id/title/params schema/默认值)."""
-    return picker_registry.catalog()
+    """选股策略全目录 (策略库 预置/自定义 + 代码插件) — 策略组下拉框用."""
+    return picker_mgr.strategy_catalog()
+
+
+class PickerStrategyReq(BaseModel):
+    id: str = ""                       # 策略库 ID (空则按名称自动生成)
+    title: str
+    desc: str = ""
+    buy_rules: list[dict] = []         # 买入条件原语 [{type, n, threshold, ...}]
+    sell_rules: list[dict] = []        # 卖出条件原语 (任一命中即卖)
+
+
+class PickerStrategyPatchReq(BaseModel):
+    title: Optional[str] = None
+    desc: Optional[str] = None
+    buy_rules: Optional[list[dict]] = None
+    sell_rules: Optional[list[dict]] = None
+
+
+class PickerBacktestReq(BaseModel):
+    universe: list[str]
+    days: int = 250                    # 回测交易日数
+    cash: float = 100_000.0
+    max_positions: int = 3
+    t1_protect: bool = True
+
+
+@app.get("/api/picker/rule-types")
+def get_picker_rule_types():
+    """条件原语目录 (类型/参数默认值/说明) — 前端规则编辑器据此渲染."""
+    return {"buy": picker_rules.BUY_RULE_TYPES, "sell": picker_rules.SELL_RULE_TYPES}
+
+
+@app.get("/api/picker/strategies")
+def list_picker_strategies():
+    """策略库全目录 (source: preset 预置 / user 自定义 / code 代码插件)."""
+    return picker_mgr.strategy_catalog()
+
+
+@app.post("/api/picker/strategies")
+async def add_picker_strategy(req: PickerStrategyReq):
+    """新建策略库策略 (规则化, 可回测, 可被策略组引用)."""
+    try:
+        saved = picker_mgr.add_strategy(req.model_dump())
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "strategy": saved}
+
+
+@app.put("/api/picker/strategies/{sid}")
+async def update_picker_strategy(sid: str, req: PickerStrategyPatchReq):
+    try:
+        saved = picker_mgr.update_strategy(sid, req.model_dump(exclude_none=True))
+    except KeyError as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "strategy": saved}
+
+
+@app.delete("/api/picker/strategies/{sid}")
+async def delete_picker_strategy(sid: str):
+    """删除策略库策略 (被策略组引用时拒绝)."""
+    try:
+        picker_mgr.delete_strategy(sid)
+    except KeyError as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True}
+
+
+@app.post("/api/picker/strategies/{sid}/backtest")
+async def backtest_picker_strategy(sid: str, req: PickerBacktestReq):
+    """策略历史回测 (真实日K, 无未来函数): 净值曲线/交易流水/胜率/最大回撤."""
+    try:
+        result = await asyncio.to_thread(
+            picker_mgr.backtest_strategy, sid, req.universe, days=req.days,
+            cash=req.cash, max_positions=req.max_positions,
+            t1_protect=req.t1_protect)
+    except KeyError as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "strategy_id": sid, **result}
 
 
 @app.post("/api/picker/groups")

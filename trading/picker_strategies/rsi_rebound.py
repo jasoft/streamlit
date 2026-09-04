@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 
 from strategy import fdata_client
+from trading.picker_rules import clean_day_bars
 from trading.picker_strategies.base import PickCandidate, PickStrategy
 
 
@@ -40,8 +41,8 @@ class RsiReboundPicker(PickStrategy):
         out: list[PickCandidate] = []
         for code in universe:                       # 串行拉取: serve 长连接复用, 不轰数据源
             try:
-                bars = await asyncio.to_thread(
-                    fdata_client.kline, code, "day", "stock", None, limit)
+                bars = clean_day_bars(await asyncio.to_thread(
+                    fdata_client.kline, code, "day", "stock", None, limit))
             except Exception:  # noqa: BLE001 单只失败跳过, 不影响整轮扫描
                 continue
             if len(bars) < vol_days + 2:

@@ -218,6 +218,41 @@ def main() -> int:
         st, r = http("POST", f"{base}/api/picker/groups/{gb}/run-once")
         step("volume_breakout 扫描不崩", st == 200 and r.get("ok") is True)
 
+        # ---- 策略库: 规则策略创建 -> 引擎即时可用 -> 买卖闭环 -> 回测 -> 删除保护 ----
+        _, rt = http("GET", f"{base}/api/picker/rule-types")
+        step("条件原语目录", bool(rt.get("buy")) and bool(rt.get("sell")))
+        gs = f"st_e2e_{TS}"
+        st, r = http("POST", f"{base}/api/picker/strategies", {
+            "id": gs, "title": "e2e 规则策略",
+            "buy_rules": [{"type": "pct_change_above", "pct": -100}],   # 必中
+            "sell_rules": [{"type": "take_profit", "pct": -100}]})      # 必卖
+        step("新建规则策略", st == 200 and r.get("strategy", {}).get("id") == gs)
+        gd = f"e2e_rule_{TS}"
+        http("POST", f"{base}/api/picker/groups", {
+            "strategy_id": gd, "picker": gs, "universe": ["600036"],
+            "per_qty": 1000, "max_positions": 1, "t1_protect": False})
+        http("POST", f"{base}/api/picker/groups/{gd}/run-once")
+        _, st_ = http("GET", f"{base}/api/picker")
+        gd_h = next((g for g in st_["groups"] if g["strategy_id"] == gd), {})
+        gd_ok = len(gd_h.get("holdings") or []) == 1
+        step("规则策略组选股买入 (引擎运行中创建即时生效)", gd_ok)
+        http("POST", f"{base}/api/picker/groups/{gd}/run-once")
+        _, st_ = http("GET", f"{base}/api/picker")
+        gd2 = next((g for g in st_["groups"] if g["strategy_id"] == gd), {})
+        step("规则策略卖出 -> 移出买入组", len(gd2.get("holdings") or []) == 0)
+        st, r = http("POST", f"{base}/api/picker/strategies/{gs}/backtest",
+                     {"universe": ["600036"], "days": 120, "cash": 100000,
+                      "max_positions": 2})
+        m = r.get("metrics") or {}
+        step("策略回测 (净值/胜率/回撤)", st == 200 and len(r.get("equity") or []) == 120
+             and "total_return_pct" in m and "win_rate_pct" in m,
+             f"收益 {m.get('total_return_pct')}% / {m.get('trades')} 笔")
+        st, _ = http("DELETE", f"{base}/api/picker/strategies/{gs}")
+        step("删除被引用策略 -> 400", st == 400)
+        http("DELETE", f"{base}/api/picker/groups/{gd}")
+        st, _ = http("DELETE", f"{base}/api/picker/strategies/{gs}")
+        step("删除未引用策略 -> 200", st == 200)
+
         # ---- 组管理: 停用/删除 ----
         st, _ = http("PUT", f"{base}/api/picker/groups/{gb}", {"enabled": False})
         _, st_ = http("GET", f"{base}/api/picker")

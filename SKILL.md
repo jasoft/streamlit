@@ -996,3 +996,23 @@ uv run python test_stock_picker.py                  # 引擎单测(假行情, �
 - **卖出当轮不回补**: 同一轮扫描内已卖出/在卖的标的, 买入扫描跳过, 防止"卖了立刻买回"换手
   (T+1 下还会锁仓)。
 - **组内串行锁**: 常驻扫描协程与 Web run-once 并发触发同一组时排队执行, 防交叉下单。
+
+### A.6 策略库与回测 (v2, 用户可管理)
+
+- **策略 = 数据不是代码**: 选股策略存 SQLite `picker_strategies` 表 (买/卖条件原语组合),
+  用户在 Web「策略库」创建/编辑/删除; 被策略组引用时删除被拒。表为空时自动播种两条预置
+  (`preset_rsi_rebound` / `preset_volume_breakout`, 可删)。原 `trading/picker_strategies/`
+  代码插件保留为开发者扩展点, 目录里标「代码插件」。
+- **条件原语** (trading/picker_rules.py, GET /api/picker/rule-types): 买入 全部命中
+  (rsi_below / vol_ratio_above / breakout_high / ma_above / ma_below / pct_change_below /
+  pct_change_above); 卖出 任一命中 (take_profit / stop_loss / rsi_above / breakdown_low /
+  ma_below / hold_days)。规则存法 `{"type": "rsi_below", "n": 6, "threshold": 25}`。
+- **回测**: POST /api/picker/strategies/{id}/backtest -> trading/picker_backtest.py。
+  口径: 当日收盘出信号按当日收盘成交 (无未来函数, 判定只用截至当日切片), 槽位均分预算整手,
+  T+1, 佣金双边 0.0001; 输出 净值曲线 / 交易流水 / 胜率 / 最大回撤。
+- **★ 盘前空槽 bar 坑**: eltdx 盘前会给日K补一根当日占位 bar (OHLC=昨收, 量额=0),
+  同时 quote.last 也会变 0 — 不处理会让全部标的被判停牌、卖出扫描静默跳过。
+  统一用 `picker_rules.clean_day_bars()` 清洗 (选股/卖出扫描/回测都走), 卖出扫描在
+  quote.last<=0 时回退最近真实收盘价。
+- 引擎侧 `RuleStrategy` (stock_picker.py) 把策略库行适配成 PickStrategy; 策略库增删改后
+  引擎 `refresh_strategies()` 即时生效, 无需重启。

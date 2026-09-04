@@ -116,7 +116,7 @@ fi
 # 2) FastAPI 后端
 # ================
 echo ">>> 启动后端 FastAPI (端口 $BACKEND_PORT)"
-uv run uvicorn backend.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload --reload-dir backend --reload-dir strategy &
+uv run uvicorn backend.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload --reload-dir backend --reload-dir strategy --reload-dir trading &
 UVICORN_PID=$!
 
 # ================

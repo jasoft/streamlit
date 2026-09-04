@@ -15,6 +15,7 @@ import secrets
 from typing import Optional
 
 from backend import picker_db
+from trading import picker_backtest, picker_rules
 from trading.picker_strategies import registry
 from trading.stock_picker import StockPickerEngine
 
@@ -28,6 +29,108 @@ def get_engine() -> Optional[StockPickerEngine]:
 def is_running() -> bool:
     eng = _engine
     return bool(eng is not None and eng.is_running)
+
+
+# ---------------------------------------------------------------- 策略库 ----
+def strategy_catalog() -> list[dict]:
+    """策略全目录: 策略库 (预置/自定义, 可管理可回测) + 代码插件 (开发者扩展)."""
+    items = []
+    for s in picker_db.list_strategies():
+        items.append({
+            "id": s["id"], "title": s["title"], "desc": s["desc"],
+            "source": "preset" if s["builtin"] else "user",
+            "buy_rules": s["buy_rules"], "sell_rules": s["sell_rules"],
+        })
+    for p in registry.discover().values():
+        items.append({"id": p.ID, "title": p.TITLE, "desc": p.DESC,
+                      "source": "code", "params": p.PARAMS})
+    return items
+
+
+def _strategy_exists(picker_id: str) -> bool:
+    return (picker_id in registry.discover()
+            or picker_db.get_strategy(picker_id) is not None)
+
+
+def add_strategy(cfg: dict) -> dict:
+    """新建策略库策略 (规则化: 买/卖条件原语组合, 可回测, 可被策略组引用)."""
+    sid = str(cfg.get("id") or "").strip()
+    title = str(cfg.get("title") or "").strip()
+    if not title:
+        raise ValueError("策略名称 (title) 必填")
+    if not sid:
+        slug = "".join(c for c in title if c.isalnum())[:16] or "st"
+        sid = f"st_{slug}_{secrets.token_hex(2)}"
+    if picker_db.get_strategy(sid):
+        raise ValueError(f"策略 ID {sid} 已存在")
+    buy_rules, err = picker_rules.validate_rules("buy", cfg.get("buy_rules"))
+    if err:
+        raise ValueError(err)
+    sell_rules, err = picker_rules.validate_rules("sell", cfg.get("sell_rules"))
+    if err:
+        raise ValueError(err)
+    saved = picker_db.upsert_strategy({
+        "id": sid, "title": title, "desc": str(cfg.get("desc") or "").strip(),
+        "buy_rules": buy_rules, "sell_rules": sell_rules,
+        "builtin": bool(cfg.get("builtin")),
+    })
+    _refresh_strategies_quiet()
+    return saved
+
+
+def update_strategy(sid: str, patch: dict) -> dict:
+    cur = picker_db.get_strategy(sid)
+    if cur is None:
+        raise KeyError(f"策略 {sid} 不存在")
+    merged = {**cur}
+    for k in ("title", "desc"):
+        if k in patch and patch[k] is not None:
+            merged[k] = str(patch[k]).strip()
+    for k in ("buy_rules", "sell_rules"):
+        if k in patch and patch[k] is not None:
+            cleaned, err = picker_rules.validate_rules(
+                "buy" if k == "buy_rules" else "sell", patch[k])
+            if err:
+                raise ValueError(err)
+            merged[k] = cleaned
+    saved = picker_db.upsert_strategy({**merged, "id": sid})
+    _refresh_strategies_quiet()
+    return saved
+
+
+def delete_strategy(sid: str) -> None:
+    """删除策略库策略; 被策略组引用时拒绝 (先删组或改组)."""
+    if picker_db.get_strategy(sid) is None:
+        raise KeyError(f"策略 {sid} 不存在")
+    refs = [g["strategy_id"] for g in picker_db.list_groups()
+            if g.get("picker") == sid]
+    if refs:
+        raise ValueError(f"策略 {sid} 正被策略组引用: {', '.join(refs)}, "
+                         f"请先删除对应策略组")
+    picker_db.delete_strategy(sid)
+    _refresh_strategies_quiet()
+
+
+def _refresh_strategies_quiet() -> None:
+    if _engine is not None:
+        try:
+            _engine.refresh_strategies()
+        except Exception:  # noqa: BLE001 刷新失败不影响 CRUD
+            pass
+
+
+def backtest_strategy(sid: str, universe: list[str], *, days: int = 250,
+                      cash: float = 100_000.0, max_positions: int = 3,
+                      t1_protect: bool = True) -> dict:
+    """规则策略历史回测 (阻塞: 串行拉日K, 由端点放 to_thread 跑)."""
+    row = picker_db.get_strategy(sid)
+    if row is None:
+        raise KeyError(f"策略 {sid} 不存在 (代码插件暂不支持回测)")
+    if not universe:
+        raise ValueError("股票池 (universe) 不能为空")
+    return picker_backtest.run_backtest(
+        row["buy_rules"], row["sell_rules"], universe, days=days, cash=cash,
+        max_positions=max_positions, t1_protect=t1_protect)
 
 
 def status() -> dict:
@@ -89,11 +192,9 @@ def add_group(cfg: dict) -> dict:
     """新增策略组 (写库 + 引擎运行中则动态起协程, 无需重启)."""
     picker_id = str(cfg.get("picker") or "").strip()
     if not picker_id:
-        raise ValueError("选股插件 (picker) 必填")
-    try:
-        registry.get(picker_id)
-    except KeyError as e:
-        raise ValueError(str(e))
+        raise ValueError("选股策略 (picker) 必填")
+    if not _strategy_exists(picker_id):
+        raise ValueError(f"选股策略不存在: {picker_id}")
     universe = cfg.get("universe") or []
     if isinstance(universe, str):
         universe = universe.replace(",", " ").split()

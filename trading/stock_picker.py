@@ -43,12 +43,50 @@ from strategy.runtime.broker import Broker, LiveBroker, SimulatedBroker  # noqa:
 from strategy.runtime.ctx import Context                        # noqa: E402
 from strategy.runtime.portfolio import Portfolio                # noqa: E402
 from strategy import fdata_client                               # noqa: E402
+from trading import picker_rules                                # noqa: E402
 from trading.condition_orders import is_market_open             # noqa: E402
 from trading.picker_strategies import registry                  # noqa: E402
-from trading.picker_strategies.base import PickStrategy         # noqa: E402
+from trading.picker_strategies.base import PickStrategy, PickCandidate  # noqa: E402
 
 LOT = 100
 BARS_TTL = 60.0          # 日 K 缓存秒数 (卖出扫描每轮都要指标, 不必每次重拉)
+
+
+class RuleStrategy(PickStrategy):
+    """策略库适配器: 把 picker_strategies 表里的规则策略行变成 PickStrategy.
+
+    用户在 Web 端创建/编辑/删除, 存 SQLite; 买入规则全部命中 -> 候选,
+    卖出规则任一命中 -> 卖出 (见 trading/picker_rules.py 的条件原语).
+    """
+
+    def __init__(self, row: dict):
+        self.ID = row["id"]
+        self.TITLE = row.get("title") or row["id"]
+        self.DESC = row.get("desc") or ""
+        self.buy_rules = row.get("buy_rules") or []
+        self.sell_rules = row.get("sell_rules") or []
+
+    async def select(self, universe: list[str], params: dict) -> list[PickCandidate]:
+        limit = int((params or {}).get("kline_limit") or 120)
+        out: list[PickCandidate] = []
+        for code in universe:                       # 串行拉取: serve 长连接复用
+            try:
+                bars = await asyncio.to_thread(
+                    fdata_client.kline, code, "day", "stock", None, limit)
+                bars = picker_rules.clean_day_bars(bars)
+            except Exception:  # noqa: BLE001 单只失败跳过
+                continue
+            reason = picker_rules.eval_buy(bars, self.buy_rules)
+            if reason and bars:                out.append(PickCandidate(
+                    code=code, name="", price=float(bars[-1].get("close") or 0),
+                    reason=reason))
+        return out
+
+    def sell_reason(self, pos: dict, quote: dict | None, bars: list[dict],
+                    params: dict) -> str:
+        last = float((quote or {}).get("last") or 0)
+        return picker_rules.eval_sell(pos, bars, self.sell_rules,
+                                      px=last or None)
 
 
 @dataclass
@@ -107,9 +145,12 @@ class StockPickerEngine:
         self._live = live
         self.cash = cash
         self.db = db
-        # 允许注入插件表 (测试用); 默认零注册自动发现
-        self.pickers: dict[str, PickStrategy] = (
-            dict(pickers) if pickers is not None else registry.discover())
+        # 策略解析: 代码插件 (零注册) + 策略库 (DB 规则策略, 覆盖同名) — 测试可注入替身
+        if pickers is not None:
+            self.pickers: dict[str, PickStrategy] = dict(pickers)
+        else:
+            self.pickers = registry.discover()
+            self._overlay_db_strategies()
         self.logs: deque[str] = deque(maxlen=300)   # 环形日志, Web 端展示用
         self.groups: dict[str, PickerGroup] = {}
         self.pfs: dict[str, Portfolio] = {}
@@ -141,6 +182,30 @@ class StockPickerEngine:
         return base
 
     # ------------------------------------------------------- 组生命周期 ----
+    def _overlay_db_strategies(self) -> None:
+        """策略库 (SQLite) 里的规则策略并入 pickers 表 (同名覆盖代码插件)."""
+        for row in self.db.list_strategies():
+            self.pickers[row["id"]] = RuleStrategy(row)
+
+    def refresh_strategies(self) -> None:
+        """策略库增删改后刷新: 重解析各组策略可用性, 运行中即时生效."""
+        for k in [k for k, v in self.pickers.items() if isinstance(v, RuleStrategy)]:
+            self.pickers.pop(k)
+        self._overlay_db_strategies()
+        for g in self.groups.values():
+            gid = g.strategy_id
+            if g.picker in self.pickers:
+                g.last_error = ""
+                if self._started and g.enabled and gid not in self._tasks:
+                    self._spawn(g)
+            else:
+                g.last_error = f"选股策略不存在: {g.picker}"
+                t = self._tasks.pop(gid, None)
+                if t is not None and not t.done():
+                    t.cancel()
+        self._log("engine", f"策略库已刷新: {sorted(
+            k for k, v in self.pickers.items() if isinstance(v, RuleStrategy))}")
+
     def _register_group(self, g: PickerGroup) -> None:
         """登记组: 独立 Portfolio + Broker (组间隔离的关键). 插件缺失只标记错误,
         不阻断登记 (资金/持仓照常可见, 补上插件 update 后即可恢复扫描)."""
@@ -152,7 +217,7 @@ class StockPickerEngine:
         self._group_locks[g.strategy_id] = asyncio.Lock()
         self._pending_buys.setdefault(g.strategy_id, [])
         if g.picker not in self.pickers:
-            g.last_error = f"选股插件不存在: {g.picker} (可选: {list(self.pickers)})"
+            g.last_error = f"选股策略不存在: {g.picker} (可用: {sorted(self.pickers)})"
             self._log(g.strategy_id, g.last_error)
 
     def _spawn(self, g: PickerGroup) -> None:
@@ -269,13 +334,14 @@ class StockPickerEngine:
         return await asyncio.to_thread(_q)
 
     async def _fetch_bars(self, code: str, limit: int) -> list[dict]:
-        """日 K (带 TTL 缓存): 卖出判定每轮要指标, 不必每轮重拉."""
+        """日 K (带 TTL 缓存): 卖出判定每轮要指标, 不必每轮重拉. 空槽 bar 已清洗."""
         key = f"{code}:{limit}"
         ts, bars = self._bars_cache.get(key, (0.0, []))
         if time.time() - ts > BARS_TTL:
             def _k() -> list[dict]:
                 try:
-                    return fdata_client.kline(code, "day", "stock", None, limit)
+                    return picker_rules.clean_day_bars(
+                        fdata_client.kline(code, "day", "stock", None, limit))
                 except Exception:  # noqa: BLE001
                     return []
             bars = await asyncio.to_thread(_k)
@@ -352,12 +418,16 @@ class StockPickerEngine:
             if g.t1_protect and str(pos.get("buy_ts", ""))[:10] == today:
                 self._log(gid, f"T+1 保护: {code} 今日买入, 当日不卖")
                 continue
+            bars = await self._fetch_bars(code, int(params.get("kline_limit") or 60))
             quote = await self._fetch_quote(code)
             last = float((quote or {}).get("last") or 0)
+            if last <= 0 and bars:
+                # 盘前/集合竞价前 quote.last 可能为 0: 回退最近真实收盘价判定
+                # (bars 已剔空槽, 最后一根即最近交易日)
+                last = float(bars[-1].get("close") or 0)
             if last <= 0:
                 continue
             self._quotes.setdefault(gid, {})[code] = last
-            bars = await self._fetch_bars(code, int(params.get("kline_limit") or 60))
             try:
                 reason = strat.sell_reason(pos, quote, bars, params) or ""
             except Exception as e:  # noqa: BLE001 插件异常不中断扫描

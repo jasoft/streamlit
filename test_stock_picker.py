@@ -223,6 +223,97 @@ def test_buy_respects_group_cash():
     print("  ✓ 现金约束 (数量下调, 现金不为负)")
 
 
+def test_rule_engine():
+    """条件原语求值: 买入全命中才选入, 卖出任一命中即卖."""
+    from trading import picker_rules
+    # 连跌 20 天: RSI6 = 0
+    bars = [{"date": f"2026-01-{i+1:02d}", "close": round(10 - i * 0.1, 2),
+             "volume": 1000} for i in range(20)]
+    ok = picker_rules.eval_buy(bars, [{"type": "rsi_below", "n": 6, "threshold": 25}])
+    assert "RSI" in ok
+    assert picker_rules.eval_buy(bars, [{"type": "rsi_below", "n": 6, "threshold": -1}]) == ""
+    # 全命中语义: 两个条件, 一个不满足 -> 空串
+    assert picker_rules.eval_buy(bars, [
+        {"type": "rsi_below", "n": 6, "threshold": 25},
+        {"type": "vol_ratio_above", "days": 5, "ratio": 99}]) == ""
+    # 卖出: 止盈 / 持仓天数
+    pos = {"buy_price": 8.0, "buy_ts": "2026-01-01T10:00:00"}
+    assert "止盈" in picker_rules.eval_sell(
+        pos, bars, [{"type": "take_profit", "pct": 10}], px=9.0)
+    assert "持仓" in picker_rules.eval_sell(
+        pos, bars, [{"type": "hold_days", "days": 5}], today="2026-01-10")
+    assert picker_rules.eval_sell(pos, bars, [{"type": "stop_loss", "pct": -50}],
+                                  px=9.0) == ""
+    # 校验器: 未知类型/非数字参数报错, 参数平铺清洗
+    clean, err = picker_rules.validate_rules("buy", [{"type": "rsi_below", "n": 6,
+                                                      "threshold": 30}])
+    assert not err and clean[0]["threshold"] == 30.0
+    _, err = picker_rules.validate_rules("buy", [{"type": "no_such"}])
+    assert err
+    _, err = picker_rules.validate_rules("sell", [{"type": "take_profit", "pct": "abc"}])
+    assert err
+    # 空槽清洗: 盘前占位 bar (量额 0) 不应让标的被判停牌 (e2e 抓到的回归)
+    dirty = bars + [{"date": "2026-01-25", "close": 8.0, "volume": 0}]
+    assert picker_rules.eval_buy(dirty, [{"type": "rsi_below", "n": 6,
+                                          "threshold": 25}]) == ""
+    cleaned = picker_rules.clean_day_bars(dirty)
+    assert len(cleaned) == len(bars)
+    assert picker_rules.eval_buy(cleaned, [{"type": "rsi_below", "n": 6,
+                                            "threshold": 25}]) != ""
+    print("  ✓ 规则引擎求值 + 校验器 + 空槽清洗")
+
+
+def test_backtest_core():
+    """回测核心 (合成数据): 先卖后买/T+1/整手/指标完整性."""
+    import datetime as dt
+    from trading.picker_backtest import _run_core
+    base = dt.date(2026, 1, 5)
+    px_a, px_b = 10.0, 20.0
+    bars_a, bars_b = [], []
+    for i in range(60):
+        px_a = round(px_a * (1.01 if i < 30 else 0.99), 4)   # 涨30天跌30天
+        px_b = round(px_b * (0.995 if i < 30 else 1.005), 4)  # 反向
+        d = (base + dt.timedelta(days=i)).isoformat()
+        bars_a.append({"date": d, "close": px_a, "volume": 1000})
+        bars_b.append({"date": d, "close": px_b, "volume": 1000})
+    res = _run_core(
+        [{"type": "pct_change_above", "pct": -100}],          # 买入必中
+        [{"type": "hold_days", "days": 3}],                   # 持仓3天必卖
+        {"AAA": bars_a, "BBB": bars_b},
+        days=60, cash=100_000.0, max_positions=2, t1_protect=True)
+    m = res["metrics"]
+    assert m["trades"] > 0, m
+    assert len(res["equity"]) == 60
+    assert res["equity"][-1]["value"] > 0
+    assert 0 <= m["win_rate_pct"] <= 100
+    assert all(t["qty"] % 100 == 0 for t in res["trades"])
+    assert all(t["sell_date"] > t["buy_date"] for t in res["trades"])  # T+1
+    print(f"  ✓ 回测核心 (合成数据, {m['trades']} 笔交易, 收益 {m['total_return_pct']}%)")
+
+
+def test_strategy_library():
+    """策略库: 预置种子 / CRUD / 被策略组引用时拒绝删除."""
+    from backend import stockpicker as sp_web
+    presets = picker_db.list_strategies()
+    assert any(s["id"] == "preset_rsi_rebound" for s in presets), "策略库应自动播种"
+    picker_db.upsert_strategy({
+        "id": "st_test", "title": "测试策略",
+        "buy_rules": [{"type": "rsi_below", "n": 6, "threshold": 30}],
+        "sell_rules": [{"type": "take_profit", "pct": 8}]})
+    assert picker_db.get_strategy("st_test")["title"] == "测试策略"
+    # 被引用: 删除被拒
+    picker_db.upsert_group({**group_cfg("gref", ["601899"]), "picker": "st_test"})
+    try:
+        sp_web.delete_strategy("st_test")
+        raise AssertionError("被策略组引用的策略应拒绝删除")
+    except ValueError:
+        pass
+    picker_db.delete_group("gref")
+    sp_web.delete_strategy("st_test")
+    assert picker_db.get_strategy("st_test") is None
+    print("  ✓ 策略库 CRUD + 引用保护 + 预置种子")
+
+
 def test_db_constraints_and_crud():
     """同组同码活动持仓唯一; 组 CRUD."""
     picker_db.upsert_group(group_cfg("g5", ["601899"]))
@@ -243,6 +334,7 @@ def main() -> None:
     for fn in (test_buy_records_into_buy_group, test_dedup_and_max_positions,
                test_sell_closes_position, test_t1_protect,
                test_groups_independent, test_buy_respects_group_cash,
+               test_rule_engine, test_backtest_core, test_strategy_library,
                test_db_constraints_and_crud):
         fn()
     print("\n全部通过 ✓")

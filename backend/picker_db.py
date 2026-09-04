@@ -70,6 +70,16 @@ CREATE TABLE IF NOT EXISTS picker_events (
     status      TEXT NOT NULL DEFAULT '',        -- filled / submitted / rejected ...
     detail      TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS picker_strategies (
+    id         TEXT PRIMARY KEY,                 -- 策略库 ID (用户创建或预置)
+    title      TEXT NOT NULL,
+    desc       TEXT NOT NULL DEFAULT '',
+    buy_rules  TEXT NOT NULL DEFAULT '[]',       -- json: [{type, n, threshold, ...}]
+    sell_rules TEXT NOT NULL DEFAULT '[]',
+    builtin    INTEGER NOT NULL DEFAULT 0,       -- 预置策略标记 (可删除)
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -282,3 +292,109 @@ def list_events(strategy_id: str | None = None, limit: int = 100) -> list[dict]:
         finally:
             c.close()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------- 策略库 ----
+# 预置策略 (规则化改写自原代码插件; 表为空时自动播种, 可删除后自建)
+_PRESETS = [
+    {
+        "id": "preset_rsi_rebound", "title": "超跌反弹 (RSI 超卖)", "builtin": 1,
+        "desc": "RSI6 深度超卖 + 放量承接买入; RSI 修复 / 止盈 / 止损卖出",
+        "buy_rules": [{"type": "rsi_below", "n": 6, "threshold": 25},
+                      {"type": "vol_ratio_above", "days": 5, "ratio": 1.5}],
+        "sell_rules": [{"type": "take_profit", "pct": 10},
+                       {"type": "stop_loss", "pct": -5},
+                       {"type": "rsi_above", "n": 6, "threshold": 55}],
+    },
+    {
+        "id": "preset_volume_breakout", "title": "放量突破", "builtin": 1,
+        "desc": "收盘突破近20日高点且放量买入; 跌破近5日低点 / 止盈 / 止损卖出",
+        "buy_rules": [{"type": "breakout_high", "days": 20},
+                      {"type": "vol_ratio_above", "days": 5, "ratio": 1.8},
+                      {"type": "pct_change_below", "pct": 7}],
+        "sell_rules": [{"type": "take_profit", "pct": 15},
+                       {"type": "stop_loss", "pct": -4},
+                       {"type": "breakdown_low", "days": 5}],
+    },
+]
+
+
+def ensure_seeded() -> None:
+    """策略库为空时播种预置策略 (用户删光后重启会再播种, 想彻底清空可自行建一条)."""
+    with _lock:
+        c = _conn()
+        try:
+            n = c.execute("SELECT COUNT(*) FROM picker_strategies").fetchone()[0]
+        finally:
+            c.close()
+    if n == 0:
+        now = _now()
+        for p in _PRESETS:
+            upsert_strategy({**p, "created_at": now, "updated_at": now})
+
+
+def _srow2dict(r) -> dict:
+    d = dict(r)
+    for k in ("buy_rules", "sell_rules"):
+        if isinstance(d.get(k), str):
+            try:
+                d[k] = json.loads(d[k])
+            except json.JSONDecodeError:
+                d[k] = []
+    d["builtin"] = bool(d.get("builtin"))
+    return d
+
+
+def upsert_strategy(s: dict) -> dict:
+    now = _now()
+    with _lock:
+        c = _conn()
+        try:
+            c.execute(
+                """INSERT INTO picker_strategies (id, title, desc, buy_rules,
+                       sell_rules, builtin, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       title=excluded.title, desc=excluded.desc,
+                       buy_rules=excluded.buy_rules, sell_rules=excluded.sell_rules,
+                       builtin=excluded.builtin, updated_at=excluded.updated_at""",
+                (s["id"], s.get("title", ""), s.get("desc", ""),
+                 json.dumps(s.get("buy_rules") or [], ensure_ascii=False),
+                 json.dumps(s.get("sell_rules") or [], ensure_ascii=False),
+                 1 if s.get("builtin") else 0, s.get("created_at") or now, now))
+            c.commit()
+        finally:
+            c.close()
+    return get_strategy(s["id"])  # type: ignore[return-value]
+
+
+def list_strategies() -> list[dict]:
+    ensure_seeded()
+    with _lock:
+        c = _conn()
+        try:
+            rows = c.execute("SELECT * FROM picker_strategies ORDER BY created_at").fetchall()
+        finally:
+            c.close()
+    return [_srow2dict(r) for r in rows]
+
+
+def get_strategy(sid: str) -> dict | None:
+    with _lock:
+        c = _conn()
+        try:
+            r = c.execute("SELECT * FROM picker_strategies WHERE id=?", (sid,)).fetchone()
+        finally:
+            c.close()
+    return _srow2dict(r) if r else None
+
+
+def delete_strategy(sid: str) -> bool:
+    with _lock:
+        c = _conn()
+        try:
+            cur = c.execute("DELETE FROM picker_strategies WHERE id=?", (sid,))
+            c.commit()
+            return cur.rowcount > 0
+        finally:
+            c.close()
