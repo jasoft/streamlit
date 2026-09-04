@@ -53,6 +53,7 @@ fi
 REG_DIR="$GIT_COMMON/dev-worktrees"
 
 FDATA_PID=""
+FDATA_OWNED=0
 UVICORN_PID=""
 FRONTEND_PID=""
 _CLEANUP_DONE=0
@@ -62,6 +63,8 @@ die() {
   echo "错误: $*" >&2
   exit 1
 }
+
+fdata_alive() { nc -z 127.0.0.1 "$FDATA_PORT" >/dev/null 2>&1; }
 
 # --------------------------
 # 端口清理：精准 lsof → PID → kill（TERM 优先，残留再 KILL）
@@ -329,7 +332,7 @@ start_stack() { # $1=worktree 根目录; 使用全局 BACKEND_PORT/FRONTEND_PORT
     sleep 1
   fi
   echo ">>> 启动后端 FastAPI (端口 $BACKEND_PORT)"
-  ( cd "$wt" && exec nohup env FDATA_PORT="$FDATA_PORT" uv run uvicorn backend.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload --reload-dir backend --reload-dir strategy ) >>"$logdir/backend.log" 2>&1 </dev/null &
+  ( cd "$wt" && exec nohup env FDATA_PORT="$FDATA_PORT" uv run uvicorn backend.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload --reload-dir backend --reload-dir strategy --reload-dir trading ) >>"$logdir/backend.log" 2>&1 </dev/null &
   UVICORN_PID=$!
   echo ">>> 启动前端 Next.js (端口 $FRONTEND_PORT)"
   ( cd "$wt/frontend" && exec nohup env PORT="$FRONTEND_PORT" BACKEND_ORIGIN="http://localhost:$BACKEND_PORT" npm run dev ) >>"$logdir/frontend.log" 2>&1 </dev/null &
@@ -416,7 +419,8 @@ cleanup() {
   # 不用 kill 0 (会误伤同进程组的无关任务), 改为端口 + cwd 精准清扫
   kill_port "$BACKEND_PORT"
   kill_port "$FRONTEND_PORT"
-  if [ -z "$NO_FDATA" ]; then
+  # 只回收自己启动的 fdata; 复用的共享 fdata (其他 worktree/主栈在用) 不动
+  if [ "$FDATA_OWNED" = "1" ]; then
     kill_port "$FDATA_PORT"
   fi
   kill_cwd_procs "$ROOT" TERM

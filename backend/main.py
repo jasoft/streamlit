@@ -925,6 +925,188 @@ async def get_quote(symbol: str):
     return await asyncio.to_thread(trader.fetch_quote_snapshot, symbol)
 
 
+# --- 选股自动交易 (trading/stock_picker.py 引擎的 Web 管理端) ---
+from backend import stockpicker as picker_mgr  # noqa: E402
+from trading import picker_rules  # noqa: E402
+
+
+class PickerGroupReq(BaseModel):
+    strategy_id: str = ""              # 策略 ID (空则自动生成, 买入组与此 ID 挂钩)
+    title: str = ""
+    picker: str                        # 选股插件 ID (GET /api/picker/pickers 可选)
+    universe: list[str] = []           # 股票池
+    params: dict = {}                  # 插件参数 (按组覆盖默认值)
+    per_qty: int = 0                   # 每只买入股数 (0=按 cash_per_symbol 自动整手)
+    cash_per_symbol: float = 10000.0
+    max_positions: int = 0             # 买入组最大持仓只数 (0=不限)
+    buy_scan_every: int = 60           # 每 N 轮 poll 跑一次选股 (卖出每轮都扫)
+    t1_protect: bool = True            # T+1: 当日买入当日不卖
+    enabled: bool = True
+
+
+class PickerGroupPatchReq(BaseModel):
+    title: Optional[str] = None
+    universe: Optional[list[str]] = None
+    params: Optional[dict] = None
+    per_qty: Optional[int] = None
+    cash_per_symbol: Optional[float] = None
+    max_positions: Optional[int] = None
+    buy_scan_every: Optional[int] = None
+    t1_protect: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+
+class PickerEngineReq(BaseModel):
+    live: bool = False
+    cash: float = 100_000.0
+    poll_seconds: float = 5.0
+
+
+@app.get("/api/picker")
+async def get_picker():
+    """选股系统全量状态: 引擎运行态 + 策略组 + 买入组持仓 + 指令流水. 停止也可只读."""
+    return picker_mgr.status()
+
+
+@app.get("/api/picker/pickers")
+def get_picker_catalog():
+    """选股策略全目录 (策略库 预置/自定义 + 代码插件) — 策略组下拉框用."""
+    return picker_mgr.strategy_catalog()
+
+
+class PickerStrategyReq(BaseModel):
+    id: str = ""                       # 策略库 ID (空则按名称自动生成)
+    title: str
+    desc: str = ""
+    buy_rules: list[dict] = []         # 买入条件原语 [{type, n, threshold, ...}]
+    sell_rules: list[dict] = []        # 卖出条件原语 (任一命中即卖)
+
+
+class PickerStrategyPatchReq(BaseModel):
+    title: Optional[str] = None
+    desc: Optional[str] = None
+    buy_rules: Optional[list[dict]] = None
+    sell_rules: Optional[list[dict]] = None
+
+
+class PickerBacktestReq(BaseModel):
+    universe: list[str]
+    days: int = 250                    # 回测交易日数
+    cash: float = 100_000.0
+    max_positions: int = 3
+    t1_protect: bool = True
+
+
+@app.get("/api/picker/rule-types")
+def get_picker_rule_types():
+    """条件原语目录 (类型/参数默认值/说明) — 前端规则编辑器据此渲染."""
+    return {"buy": picker_rules.BUY_RULE_TYPES, "sell": picker_rules.SELL_RULE_TYPES}
+
+
+@app.get("/api/picker/strategies")
+def list_picker_strategies():
+    """策略库全目录 (source: preset 预置 / user 自定义 / code 代码插件)."""
+    return picker_mgr.strategy_catalog()
+
+
+@app.post("/api/picker/strategies")
+async def add_picker_strategy(req: PickerStrategyReq):
+    """新建策略库策略 (规则化, 可回测, 可被策略组引用)."""
+    try:
+        saved = picker_mgr.add_strategy(req.model_dump())
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "strategy": saved}
+
+
+@app.put("/api/picker/strategies/{sid}")
+async def update_picker_strategy(sid: str, req: PickerStrategyPatchReq):
+    try:
+        saved = picker_mgr.update_strategy(sid, req.model_dump(exclude_none=True))
+    except KeyError as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "strategy": saved}
+
+
+@app.delete("/api/picker/strategies/{sid}")
+async def delete_picker_strategy(sid: str):
+    """删除策略库策略 (被策略组引用时拒绝)."""
+    try:
+        picker_mgr.delete_strategy(sid)
+    except KeyError as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True}
+
+
+@app.post("/api/picker/strategies/{sid}/backtest")
+async def backtest_picker_strategy(sid: str, req: PickerBacktestReq):
+    """策略历史回测 (真实日K, 无未来函数): 净值曲线/交易流水/胜率/最大回撤."""
+    try:
+        result = await asyncio.to_thread(
+            picker_mgr.backtest_strategy, sid, req.universe, days=req.days,
+            cash=req.cash, max_positions=req.max_positions,
+            t1_protect=req.t1_protect)
+    except KeyError as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "strategy_id": sid, **result}
+
+
+@app.post("/api/picker/groups")
+async def add_picker_group(req: PickerGroupReq):
+    """新建策略组: 选股插件 + 股票池 -> 买入的股票入库到该策略 ID 的买入组."""
+    try:
+        entry = picker_mgr.add_group(req.model_dump())
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "group": entry}
+
+
+@app.put("/api/picker/groups/{gid}")
+async def update_picker_group(gid: str, req: PickerGroupPatchReq):
+    """更新策略组 (参数/启停/仓位约束). 引擎运行中即时生效."""
+    patch = {k: v for k, v in req.model_dump().items() if v is not None}
+    try:
+        saved = picker_mgr.update_group(gid, patch)
+    except KeyError as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    return {"ok": True, "group": saved}
+
+
+@app.delete("/api/picker/groups/{gid}")
+async def delete_picker_group(gid: str):
+    """删除策略组 (买入组持仓与流水保留审计)."""
+    if not picker_mgr.remove_group(gid):
+        return JSONResponse(status_code=404, content={"detail": f"策略组 {gid} 不存在"})
+    return {"ok": True}
+
+
+@app.post("/api/picker/groups/{gid}/run-once")
+async def run_picker_once(gid: str, live: bool = False):
+    """手动跑指定策略组一轮扫描 (force 无视盘中时段, 默认模拟下单)."""
+    try:
+        return await picker_mgr.run_once(gid, live=live)
+    except KeyError as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
+
+
+@app.post("/api/picker/engine/start")
+async def start_picker_engine(req: PickerEngineReq):
+    return await picker_mgr.start(req.live, req.cash, req.poll_seconds)
+
+
+@app.post("/api/picker/engine/stop")
+async def stop_picker_engine():
+    return await picker_mgr.stop()
+
+
 @app.get("/api/intraday/{symbol}")
 async def get_intraday(symbol: str):
     """当日 1m K 线 + VWAP + MACD + 昨收 — 前端首次加载全量, 后续走 WS 增量."""

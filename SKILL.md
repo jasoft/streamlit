@@ -1139,3 +1139,98 @@ uv run python -m unittest tests.test_strategy_system     # 策略系统单测
 
 > 文档版本: v1.0 | 生成日期: 2026-09-02 | 基于项目状态: 前端 vNext.js15/ECharts6, 后端 FastAPI, 策略 vbt\_adapter, fdata serve 模式, ths\_trade 高速查询优化版
 
+
+---
+
+## 附：选股自动交易系统（stock_picker.py）
+
+> "策略运行返回满足买入条件的股票 -> 买入 -> 按策略 ID 入库为买入组 -> 扫描买入组, 命中卖出条件即发卖出指令; 不同策略组彼此独立, 可同时运行多个策略。"
+
+### A.1 数据流与关键文件
+
+```
+选股插件 select() 扫股票池 -> 候选(去重/限仓) -> broker 下单(默认模拟)
+  -> 成交写入 SQLite picker_positions (strategy_id 挂钩) = 买入组
+每轮对买入组持仓跑插件 sell_reason() -> 命中 -> 卖出指令 -> 平仓记录(sold 留痕)
+```
+
+| 文件 | 职责 |
+| --- | --- |
+| `trading/picker_strategies/` | 选股插件包: `base.py` (PickStrategy 抽象 + RSI/MA 工具), `registry.py` 零注册发现; 内置 `rsi_rebound`(超跌反弹) / `volume_breakout`(放量突破) |
+| `trading/stock_picker.py` | `StockPickerEngine`: 每策略组一个 asyncio 任务 (仿条件单引擎); CLI `--live/--once/--id` |
+| `backend/picker_db.py` | SQLite (`backend/stockpicker.db`): picker_groups 策略组配置 / picker_positions 买入组持仓(holding/selling/sold) / picker_events 指令流水; `PICKER_DB_PATH` 可覆盖(测试) |
+| `backend/stockpicker.py` | Web 胶水 (仿 conditions.py): 引擎生命周期 + 组 CRUD + run-once |
+| `frontend/src/app/picker/` | 🎯 选股页: 引擎控制 / 新建策略组 / 买入组持仓(现价+盈亏%) / 指令流水 / 日志 |
+
+### A.2 核心语义
+
+- **买入组与策略 ID 挂钩**: 同一 strategy_id 的 holding 持仓即该策略的买入组; 每组独立 Portfolio (`strategy/state/stockpicker_<id>.state.json`) + 独立协程, 组间完全隔离, 同码可被不同组各持一笔。
+- **约束**: `max_positions` 限仓 / 已持有(含在途)去重 / `per_qty=0` 按单票预算自动整手 / `t1_protect` T+1 当日买入当日不卖(默认开)。
+- **扫描节奏**: 卖出每轮都扫(先卖后买), 买入每 `buy_scan_every` 轮一次; 非盘中(09:30-11:30/13:00-15:00)自动空转; 实盘成交回报异步推进 holding→selling→sold(被拒回 holding)。
+- **默认模拟**: `live=false` 走 SimulatedBroker 记账不碰同花顺; `--live`/前端实盘开关才真实下单, 与全部下单类功能同一安全约定。
+
+### A.3 API 与用法
+
+```
+GET  /api/picker                        全量状态(引擎+策略组+买入组+流水, 停止可只读)
+GET  /api/picker/pickers                选股插件目录(id/title/params schema)
+POST  /api/picker/groups                新建策略组 {picker, universe, params, per_qty, max_positions, ...}
+PUT   /api/picker/groups/{gid}          更新(参数/启停/限仓, 运行中即时生效)
+DELETE /api/picker/groups/{gid}         删除组(持仓/流水保留审计)
+POST  /api/picker/groups/{gid}/run-once 手动跑一轮(force 无视盘中时段, 默认模拟)
+POST  /api/picker/engine/start|stop     引擎启停 {live, cash, poll_seconds}
+```
+
+```bash
+uv run python trading/stock_picker.py --once        # CLI 手动跑一轮(验证链路)
+uv run python test_stock_picker.py                  # 引擎单测(假行情, 不依赖盘中/fdata)
+```
+
+**新增选股插件**: 在 `trading/picker_strategies/` 放一个 py 文件, 暴露 `PickStrategy` 子类
+(唯一 `ID` + `PARAMS` 默认值), 实现 `select()`(返回候选) 与 `sell_reason()`(返回卖出原因串),
+重启后端即被发现; 插件不做任何下单/记账, 同一插件可挂多个策略组(参数按组覆盖)。
+
+### A.4 测试与多 worktree 隔离
+
+- `uv run python test_stock_picker.py` — 引擎单测 (假行情, 不依赖盘中/fdata): 入库挂钩/去重限仓/
+  卖出平仓/T+1/组间独立/现金约束/DB约束。
+- `uv run python test_e2e_picker.py` — **全链路 e2e (真实 fdata 行情)**: 自起独立端口后端+前端
+  (临时 SQLite, 不碰主 worktree), 覆盖 运行文件复制/API 全量+校验/选股买入(名称≠代码回归)/
+  买卖闭环(t1_protect=false + 宽松卖出参数)/volume_breakout/前端代理, 23 项断言, 结束自动清现场。
+  前提: fdata serve 已运行 (9701)。
+- **多 worktree 端口隔离**: worktree 根放 `.env.worktree` (已 gitignore) 声明
+  `BACKEND_PORT/FRONTEND_PORT`, dev.sh 自动加载 (本 worktree: 后端 8002 / 前端 3002);
+  fdata (9701) 已在监听则直接复用不重启, 清理与退出都不会误杀共享 fdata 或其他 worktree 的
+  uvicorn (pkill 按 `--port` 收窄)。next.config.ts 的 rewrite 跟随 BACKEND_PORT。
+
+### A.5 实现要点 (踩坑记录)
+
+- **股票名称来源**: fdata kline 无 name 字段, 名称与最新下单价都由引擎在买入前用实时快照
+  (`fdata_client.quote`) 补全 — 插件 select() 只从 K 线拿价格, name 留空串。
+- **插件参数解析必须用 `PickStrategy.p(params, key, default)`**: `params.get(k) or default`
+  会把合法的 0/False 覆盖值 (如 vol_ratio=0 不设门槛) 吞掉回退默认值。
+- **现金约束**: 固定 per_qty 超过组内可用现金时自动下调到整手可负担量 (日志可见), 现金不为负、
+  实盘不产生废单。
+- **卖出当轮不回补**: 同一轮扫描内已卖出/在卖的标的, 买入扫描跳过, 防止"卖了立刻买回"换手
+  (T+1 下还会锁仓)。
+- **组内串行锁**: 常驻扫描协程与 Web run-once 并发触发同一组时排队执行, 防交叉下单。
+
+### A.6 策略库与回测 (v2, 用户可管理)
+
+- **策略 = 数据不是代码**: 选股策略存 SQLite `picker_strategies` 表 (买/卖条件原语组合),
+  用户在 Web「策略库」创建/编辑/删除; 被策略组引用时删除被拒。表为空时自动播种两条预置
+  (`preset_rsi_rebound` / `preset_volume_breakout`, 可删)。原 `trading/picker_strategies/`
+  代码插件保留为开发者扩展点, 目录里标「代码插件」。
+- **条件原语** (trading/picker_rules.py, GET /api/picker/rule-types): 买入 全部命中
+  (rsi_below / vol_ratio_above / breakout_high / ma_above / ma_below / pct_change_below /
+  pct_change_above); 卖出 任一命中 (take_profit / stop_loss / rsi_above / breakdown_low /
+  ma_below / hold_days)。规则存法 `{"type": "rsi_below", "n": 6, "threshold": 25}`。
+- **回测**: POST /api/picker/strategies/{id}/backtest -> trading/picker_backtest.py。
+  口径: 当日收盘出信号按当日收盘成交 (无未来函数, 判定只用截至当日切片), 槽位均分预算整手,
+  T+1, 佣金双边 0.0001; 输出 净值曲线 / 交易流水 / 胜率 / 最大回撤。
+- **★ 盘前空槽 bar 坑**: eltdx 盘前会给日K补一根当日占位 bar (OHLC=昨收, 量额=0),
+  同时 quote.last 也会变 0 — 不处理会让全部标的被判停牌、卖出扫描静默跳过。
+  统一用 `picker_rules.clean_day_bars()` 清洗 (选股/卖出扫描/回测都走), 卖出扫描在
+  quote.last<=0 时回退最近真实收盘价。
+- 引擎侧 `RuleStrategy` (stock_picker.py) 把策略库行适配成 PickStrategy; 策略库增删改后
+  引擎 `refresh_strategies()` 即时生效, 无需重启。
